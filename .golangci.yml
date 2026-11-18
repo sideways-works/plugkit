@@ -1,0 +1,130 @@
+version: "2"
+
+# Every linter on, except the ones below, each disabled for a written reason.
+linters:
+  default: all
+  disable:
+    # Needs a list of allowed imports; go.mod is that list here.
+    - depguard
+    # Protocol structs have many optional fields; filling every one would
+    # hide the few that matter.
+    - exhaustruct
+    - exhaustruct_v5
+    # Go's style is short names in small scopes (ctx, s, r, w, id).
+    - varnamelen
+    # Line length is gofmt's business, not a lint error.
+    - lll
+    # nlreturn duplicates wsl_v5's return rule.
+    - nlreturn
+    # Deprecated: replaced by wsl_v5 and gomodguard_v2 (both on).
+    - wsl
+    - gomodguard
+    # Forbids `if err := f(); err != nil`, which is idiomatic Go.
+    - noinlineerr
+    # cyclop measures the same cyclomatic complexity as gocyclo, which is on.
+    - cyclop
+    # Sizes, limits and timeouts read best where they're used; repeated or
+    # meaningful ones are named constants already.
+    - mnd
+    # Go has no constant slices or maps: lookup tables and compiled patterns
+    # are read-only package variables.
+    - gochecknoglobals
+    # Tests start processes and containers; running them in parallel would
+    # start them all at once on a shared machine.
+    - paralleltest
+    # Tests are white-box on purpose: they exercise unexported helpers.
+    - testpackage
+    # Files are ordered by reading flow (a function next to its helpers).
+    - funcorder
+    # Named results document same-typed results, which revive's
+    # confusing-results asks for.
+    - nonamedreturns
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+      exclude-functions:
+        # Closing a body we read from: the data is already in hand, so a
+        # close error changes nothing.
+        - (io.ReadCloser).Close
+    exhaustive:
+      # A default case is a decision about every other value.
+      default-signifies-exhaustive: true
+    gosec:
+      excludes:
+        # Unchecked errors are errcheck's job, with its own exclusions.
+        - G104
+    ireturn:
+      allow:
+        - error
+        - empty
+        - stdlib
+        - generic
+    funlen:
+      # wsl_v5 puts a blank line around most blocks, so a line count measures
+      # spacing as much as size; the statement count measures what the
+      # function does.
+      lines: -1
+      statements: 40
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+    wrapcheck:
+      # Our own packages return errors that already say what failed;
+      # wrapping them again only repeats the context.
+      ignore-package-globs:
+        - github.com/sideways-works/plugkit/*
+      ignore-interface-regexps:
+        - ^github\.com/sideways-works/plugkit/
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+    tagliatelle:
+      case:
+        rules:
+          # The protocol speaks snake_case.
+          json: snake
+          yaml: snake
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+  exclusions:
+    generated: lax
+    # No lint rule asks for a comment: one is there only where the code
+    # can't say it.
+    presets:
+      - comments
+    rules:
+      # Tests repeat literal fixtures on purpose, and table-driven tests are
+      # long by nature: the bug linters stay on, the size and repetition
+      # limits don't apply.
+      - path: _test\.go
+        linters:
+          - goconst
+          - prealloc
+          - funlen
+          - gocognit
+          - gocyclo
+          - nestif
+          - maintidx
+          - dupl
+          - unparam
+      # Tests read and write their own temporary files and run git.
+      - path: _test\.go
+        linters:
+          - gosec
+        text: "G(204|304|306)"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false

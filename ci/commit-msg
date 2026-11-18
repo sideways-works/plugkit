@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The repository's commit-msg hook: one conventional subject line of at
+# most 72 characters, no body and no trailers. Install it once per clone:
+#
+#   cp ci/commit-msg "$(git rev-parse --git-path hooks)/commit-msg"
+set -eu
+
+mapfile -t lines < <(grep -v '^#' "$1" | sed -e 's/\r$//')
+while ((${#lines[@]} > 0)) && [[ -z "${lines[-1]//[[:space:]]/}" ]]; do
+  unset 'lines[-1]'
+done
+
+fail() {
+  echo "commit message: $*" >&2
+  exit 1
+}
+
+((${#lines[@]} > 0)) || fail "empty"
+((${#lines[@]} == 1)) || fail "one subject line only, no body and no trailers: \"${lines[0]}\""
+
+s=${lines[0]}
+[[ "$s" == "$(echo "$s" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" ]] || fail "space around the subject: \"$s\""
+[[ "$s" =~ ^(feat|fix|docs|test|build|ci|refactor|chore|perf)(\([a-z0-9][a-z0-9/._-]*\))?:\ [^[:space:]] ]] ||
+  fail "not type(scope): subject with a conventional type (feat, fix, docs, test, build, ci, refactor, chore, perf): \"$s\""
+n=$(printf '%s' "$s" | wc -m)
+((n <= 72)) || fail "$n characters, at most 72: \"$s\""
