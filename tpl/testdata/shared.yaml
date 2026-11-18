@@ -1,0 +1,6 @@
+{{ include "https://github.com/sideways-works/ci-shared.git//lint.yaml@3f2a9c0e41b7d5c1a0e9f2b6c4d8e7a1b3c5d7e9" . }}
+pipelines:
+  main:
+    jobs:
+      lint:
+        {{- include "lint" (dict "image" "golang") | nindent 8 }}

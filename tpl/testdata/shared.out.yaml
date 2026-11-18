@@ -1,0 +1,11 @@
+
+
+pipelines:
+  main:
+    jobs:
+      lint:
+        
+        steps:
+          - uses: git
+          - run: [golangci-lint, run, ./...]
+            image: golang

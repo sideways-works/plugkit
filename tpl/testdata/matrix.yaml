@@ -1,0 +1,18 @@
+version: 1
+values:
+  packages: [./api/..., ./worker/..., ./cli/...]
+images:
+  golang: {ref: golang:1.27.1, digest: sha256:162b...}
+pipelines:
+  main:
+    triggers:
+      - uses: git
+        with: {resource: source, branch: main}
+    jobs:
+{{- range .Values.packages }}
+      test-{{ base (dir .) }}:
+        steps:
+          - uses: git
+          - run: [go, test, "{{ . }}"]
+            image: golang
+{{- end }}

@@ -1,0 +1,6 @@
+{{- define "lint" }}
+steps:
+  - uses: git
+  - run: [golangci-lint, run, ./...]
+    image: {{ .image }}
+{{- end }}

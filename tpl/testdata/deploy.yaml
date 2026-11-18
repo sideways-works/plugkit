@@ -1,0 +1,26 @@
+version: 1
+defines:
+  ENVIRONMENT: staging
+env: [DEPLOY_REGION]
+secrets:
+  deploy_key: {from: file, key: deploy/{{ .Defines.ENVIRONMENT }}, writes: true}
+pipelines:
+  deploy:
+    triggers:
+      - uses: git
+        with: {resource: source, branch: main}
+    jobs:
+      deploy:
+        needs: 'w.labels.site == "{{ .Env.DEPLOY_REGION }}"'
+        steps:
+          - run: [/ci/tools/deploy, {{ .Defines.ENVIRONMENT }}]
+            image: deploy
+            secrets: {DEPLOY_KEY: deploy_key}
+            trust: pinned
+{{- if eq .Defines.ENVIRONMENT "production" }}
+      announce:
+        after: [deploy]
+        steps:
+          - run: [/ci/tools/announce, release]
+            image: deploy
+{{- end }}

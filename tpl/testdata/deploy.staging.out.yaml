@@ -1,0 +1,19 @@
+version: 1
+defines:
+  ENVIRONMENT: staging
+env: [DEPLOY_REGION]
+secrets:
+  deploy_key: {from: file, key: deploy/staging, writes: true}
+pipelines:
+  deploy:
+    triggers:
+      - uses: git
+        with: {resource: source, branch: main}
+    jobs:
+      deploy:
+        needs: 'w.labels.site == "fsn1"'
+        steps:
+          - run: [/ci/tools/deploy, staging]
+            image: deploy
+            secrets: {DEPLOY_KEY: deploy_key}
+            trust: pinned
