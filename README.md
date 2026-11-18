@@ -117,7 +117,7 @@ err := x.Call(ctx, "status", workDir, args, &answer)
 
 `container` runs a command in an image with docker or podman, the given
 directories mounted and the given environment only. A rootful tool's files
-are handed back to the user by a second container that runs chown.
+are handed back to the user by a second container that runs chown. A call can run sandboxed: `Network: "none"` cuts the container off, `ReadOnlyRoot` makes the image read-only, mounts marked `ReadOnly` can't be written, and `Env` is the whole environment besides the image's own.
 
 ```go
 tool, _ := container.Find("")

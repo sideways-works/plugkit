@@ -152,3 +152,27 @@ func TestAKeptContainerIsNotRemovedWhenItEnds(t *testing.T) {
 		t.Fatalf("args: %q", got)
 	}
 }
+
+// A sandboxed call runs without a network on a read-only image, writing only to what is mounted.
+func TestASandboxedCallHasNoNetworkAndAReadOnlyRoot(t *testing.T) {
+	r := Run{
+		Tool: "podman", Image: "alpine:3", Name: "call", Dir: "/w", Network: "none", ReadOnlyRoot: true,
+		Mounts: []Mount{{Host: "/in", At: "/in", ReadOnly: true}, {Host: "/w", At: "/w"}},
+		Cmd:    []string{"plugin", "describe"},
+	}
+
+	got, err := r.Args()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"run", "--rm", "--name", "call", "--network", "none", "--workdir", "/w", "--read-only",
+		"--volume", "/in:/in:ro", "--volume", "/w:/w",
+		"--entrypoint", "plugin", "alpine:3", "describe",
+	}
+
+	if !slices.Equal(got, want) {
+		t.Fatalf("args:\n got %q\nwant %q", got, want)
+	}
+}

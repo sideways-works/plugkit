@@ -62,6 +62,10 @@ type Run struct {
 	Env          map[string]string
 	User, UserNS string
 	Privileged   bool
+	// Network is the container's network, "bridge" when empty; "none" cuts it off.
+	Network string
+	// ReadOnlyRoot mounts the image's own file system read-only; only Mounts can then be written.
+	ReadOnlyRoot bool
 	// Keep leaves the container once it ends, for a commit; whoever keeps it removes it.
 	Keep bool
 	// Before runs in the same shell ahead of Cmd, stopping at the first failure; After runs once
@@ -72,15 +76,24 @@ type Run struct {
 
 var errColon = errors.New("a path with a colon can't be mounted")
 
-// Args are the tool's arguments: run, with the default bridge network.
+// Args are the tool's arguments: run, on the bridge network unless Network names another.
 func (r Run) Args() ([]string, error) {
-	args := []string{"run", "--rm", "--name", r.Name, "--network", "bridge", "--workdir", r.Dir}
+	network := r.Network
+	if network == "" {
+		network = "bridge"
+	}
+
+	args := []string{"run", "--rm", "--name", r.Name, "--network", network, "--workdir", r.Dir}
 	if r.Keep {
 		args = slices.Delete(args, 1, 2)
 	}
 
 	if r.Privileged {
 		args = append(args, "--privileged")
+	}
+
+	if r.ReadOnlyRoot {
+		args = append(args, "--read-only")
 	}
 
 	if r.User != "" {
