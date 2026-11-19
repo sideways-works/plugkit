@@ -156,6 +156,36 @@ r, err := s.Resolve(ctx, store.Pin{Zip: &store.Zip{URL: url, SHA256: sum}}, "lin
 // r.Program is the checked program for linux/amd64, r.Dir holds manifest.yaml and the assets
 ```
 
+A plugin manifest may also carry what a listing shows, `description` and
+`logo` (a file of the plugin's directory), and what the plugin offers and
+needs, `implements` and `requires`, each a list of `"<name> <semver range>"`.
+A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
+`schemas`, a JSON Schema file for each message and one for its answer, with
+an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
+message. It resolves to its directory as a plugin built for `[any]` does,
+and nothing of it is built.
+
+`repository` reads what a plugin repository holds, from
+`repository-manifest.yaml` at its root (or a root `manifest.yaml` with a
+`plugins` list), and lists its plugins' versions with plain git: `git
+ls-remote --tags` for the versions, one shallow fetch of the default branch
+for the manifests, and the caller's git credentials. No forge's API is used.
+A repository with neither file at its root but a plugin's `manifest.yaml`
+is that one plugin, at `.`, tagged `v{version}`.
+
+```yaml
+repository: 1                   # the format; another is refused
+tags: "{path}/v{version}"       # {name}, {path} and {version}; default {name}-v{version}
+plugins:
+  - manifest: step/go-test/manifest.yaml   # its directory is the plugin's path
+    name: go-test                          # name, kind, description and logo default to the manifest's
+```
+
+```go
+plugins, err := repository.List(ctx, "https://git.example.com/acme/plugins", repository.Options{})
+m, commit, err := repository.At(ctx, "https://git.example.com/acme/plugins", "step/go-test", "0.2.0")
+```
+
 `kit` is the generic part of a conformance kit: it calls a plugin in work
 directories of its own and holds the checks every kind shares. It fails a
 plugin that answers an unknown call, whose describe names another version
