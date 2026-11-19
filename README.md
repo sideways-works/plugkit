@@ -7,7 +7,7 @@ standard output, or keeps one process running and talks to it in JSON lines.
 A plugin that has to reach the outside answers with HTTP requests as data,
 and the host sends them, adding credentials the plugin never sees.
 
-The module depends on nothing but the Go standard library.
+The module depends on the Go standard library and a YAML parser.
 
 ```mermaid
 flowchart LR
@@ -125,6 +125,35 @@ r := container.Run{Tool: tool, Image: "busybox:1.37.0", Name: container.Name("bu
 	Mounts: []container.Mount{{Host: dir, At: dir}}, Cmd: []string{"make", "test"}}
 cmd, _ := r.Command(ctx)
 err := cmd.Run()
+```
+
+A plugin can also come without a release. `manifest` reads the
+`manifest.yaml` in its directory: name, kind, program, the build's image
+(pinned by digest), command and environment, its platforms (`os/arch`
+pairs, or `[any]` for one build that runs everywhere), and the files and
+asset directories that go with the program. Unknown keys are refused.
+`build` runs the command in that image through `container`, once per
+platform, with the repository mounted read-only, `{out}` the only place it
+can write, no network unless the manifest asks for one, and `GOFLAGS=-trimpath`.
+It lays the plugin out as its zip holds it. `bundle` packs that layout into
+a zip with fixed times and sorted entries, so the same build gives the same
+bytes, and unpacks one safely. `manifest.yaml` must sit at the zip's top
+level. A zip is refused if it has a path that leaves the directory, a
+symlink, a file that is no part of the plugin, or an executable besides the
+program, or if it unpacks past a size limit.
+
+`store` resolves a plugin pinned by a commit or by a zip to a directory of
+the cache. A commit is fetched into a bare mirror, built for the platform
+and kept under a key of its repository, commit, path, manifest digest,
+platform and image digest. A zip is downloaded, checked against its sha256
+before it is opened, unpacked and kept under that sha256. The same key
+never builds or downloads twice, and every entry appears whole, by a rename.
+`store.Trim` removes what no resolve used lately.
+
+```go
+s := store.Store{Dir: filepath.Join(cacheDir, "releases")}
+r, err := s.Resolve(ctx, store.Pin{Zip: &store.Zip{URL: url, SHA256: sum}}, "linux/amd64")
+// r.Program is the checked program for linux/amd64, r.Dir holds manifest.yaml and the assets
 ```
 
 `kit` is the generic part of a conformance kit: it calls a plugin in work
