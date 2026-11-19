@@ -64,22 +64,28 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		o.Log = io.Discard
 	}
 
-	tool, err := container.Find(o.Tool)
-	if err != nil {
-		return m, fmt.Errorf("%w: %w", ErrBuild, err)
-	}
+	b := builder{o: o, m: m}
 
-	if _, err := container.Ensure(ctx, tool, m.Build.Image, o.Log); err != nil {
-		return m, fmt.Errorf("%w: %w", ErrBuild, err)
+	// a meta plugin is its manifest and files alone: nothing runs
+	if m.Kind != manifest.KindMeta {
+		if b.tool, err = container.Find(o.Tool); err != nil {
+			return m, fmt.Errorf("%w: %w", ErrBuild, err)
+		}
+
+		if _, err := container.Ensure(ctx, b.tool, m.Build.Image, o.Log); err != nil {
+			return m, fmt.Errorf("%w: %w", ErrBuild, err)
+		}
 	}
 
 	if err := os.Mkdir(o.Out, 0o750); err != nil {
 		return m, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
-	b := builder{o: o, m: m, tool: tool}
-
 	for i, p := range platforms {
+		if m.Kind == manifest.KindMeta {
+			break
+		}
+
 		script, err := b.platform(ctx, p, i == 0)
 		if err != nil {
 			return m, err
@@ -93,6 +99,12 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 
 	if err := b.files(); err != nil {
 		return m, err
+	}
+
+	if err := manifest.CheckSchemas(m, func(f string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(o.Out, filepath.FromSlash(f)))
+	}); err != nil {
+		return m, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
 	if err := os.WriteFile(filepath.Join(o.Out, manifest.FileName), o.Manifest, 0o644); err != nil { //nolint:gosec // a plugin's files are readable
@@ -307,7 +319,25 @@ func copyAssets(from, to, name string) error {
 // files copies the manifest's files from the plugin's directory; a symlink is refused, since it
 // could name a file of the machine outside the repository.
 func (b builder) files() error {
+	type copied struct{ from, to string }
+
+	var all []copied
+
 	for _, f := range b.m.Files {
+		all = append(all, copied{f, manifest.FileBase(f)})
+	}
+
+	for _, e := range b.m.Extras() {
+		// an extra the build wrote into an asset directory is there already
+		if _, err := os.Lstat(filepath.Join(b.o.Out, filepath.FromSlash(e))); err == nil {
+			continue
+		}
+
+		all = append(all, copied{e, e})
+	}
+
+	for _, c := range all {
+		f := c.from
 		src := filepath.Join(b.o.Root, filepath.FromSlash(b.o.Dir), filepath.FromSlash(f))
 
 		info, err := os.Lstat(src)
@@ -319,7 +349,12 @@ func (b builder) files() error {
 			return fmt.Errorf("%w: files: %s is no plain file of the repository", ErrBuild, f)
 		}
 
-		if err := copyFile(src, filepath.Join(b.o.Out, manifest.FileBase(f))); err != nil {
+		to := filepath.Join(b.o.Out, filepath.FromSlash(c.to))
+		if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+			return fmt.Errorf("%w: files: %w", ErrBuild, err)
+		}
+
+		if err := copyFile(src, to); err != nil {
 			return fmt.Errorf("%w: files: %w", ErrBuild, err)
 		}
 	}

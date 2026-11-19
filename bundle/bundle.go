@@ -41,6 +41,8 @@ const (
 	File
 	Asset
 	AssetDir
+	// Extra is the logo, or a meta plugin's schema file, under its own path.
+	Extra
 )
 
 // RoleOf says what name (slash-separated, relative to the zip's top) is for the plugin m.
@@ -61,6 +63,15 @@ func RoleOf(m manifest.Manifest, name string) Role {
 		case strings.HasPrefix(name, a+"/"):
 			return Asset
 		case strings.HasPrefix(a, name+"/"):
+			return AssetDir
+		}
+	}
+
+	for _, e := range m.Extras() {
+		switch {
+		case name == e:
+			return Extra
+		case strings.HasPrefix(e, name+"/"):
 			return AssetDir
 		}
 	}
@@ -123,6 +134,10 @@ func Pack(dir string, w io.Writer) error {
 		return fmt.Errorf("%w: pack %s: no file of program %s (%s)", ErrBundle, dir, m.Program, strings.Join(m.ProgramFiles(), ", "))
 	}
 
+	if err := manifest.CheckSchemas(m, readIn(dir)); err != nil {
+		return fmt.Errorf("%w: pack %s: %w", ErrBundle, dir, err)
+	}
+
 	slices.Sort(names)
 
 	return write(dir, m, names, w)
@@ -163,6 +178,13 @@ func write(dir string, m manifest.Manifest, names []string, w io.Writer) error {
 	}
 
 	return nil
+}
+
+// readIn reads a file of dir by its slash-separated path, which the manifest's checks keep in dir.
+func readIn(dir string) func(string) ([]byte, error) {
+	return func(name string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(dir, filepath.FromSlash(name))) //nolint:gosec // a file of the plugin's layout
+	}
 }
 
 func readManifest(dir string) (manifest.Manifest, []byte, error) {
@@ -234,6 +256,10 @@ func Unpack(file, dest string, limits Limits) (manifest.Manifest, error) {
 
 	if m.Program != "" && !slices.ContainsFunc(m.ProgramFiles(), func(f string) bool { return seen[f] }) {
 		return manifest.Manifest{}, fmt.Errorf("%w: no file of program %s (%s)", ErrBundle, m.Program, strings.Join(m.ProgramFiles(), ", "))
+	}
+
+	if err := manifest.CheckSchemas(m, readIn(dest)); err != nil {
+		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBundle, err)
 	}
 
 	return m, nil
