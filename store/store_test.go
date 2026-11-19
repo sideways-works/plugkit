@@ -1,0 +1,417 @@
+package store
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sideways-works/plugkit/build"
+	"github.com/sideways-works/plugkit/bundle"
+	"github.com/sideways-works/plugkit/container"
+)
+
+const (
+	goImage = "golang:1.25.7-bookworm@sha256:564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1"
+	shImage = "busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec"
+	host    = runtime.GOOS + "/" + runtime.GOARCH
+)
+
+func needTool(t *testing.T, image string) string {
+	t.Helper()
+
+	tool, err := container.Find("")
+	if err != nil || !container.Reachable(context.Background(), tool) {
+		t.Skipf("no container tool to build with (docker or podman): %v", err)
+	}
+
+	if !container.HasImage(context.Background(), tool, image) {
+		t.Skipf("%s doesn't have %s; pull it to run this test", tool, image)
+	}
+
+	return tool
+}
+
+func write(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+
+	for name, body := range files {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+
+	return strings.TrimSpace(string(out))
+}
+
+// goRepo is a repository holding a tiny Go plugin at plugins/hello, and its commit.
+func goRepo(t *testing.T) (string, string) {
+	t.Helper()
+
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"go.mod":                          "module example.com/plugins\n\ngo 1.25\n",
+		"plugins/hello/cmd/hello/main.go": "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello\") }\n",
+		"plugins/hello/LICENSE":           "license\n",
+		"plugins/hello/manifest.yaml": `name: hello
+kind: driver
+program: hello
+build:
+  image: ` + goImage + `
+  run: [go, build, -o, "{out}/hello", ./cmd/hello]
+  env: {CGO_ENABLED: "0", GOOS: "{os}", GOARCH: "{arch}", GOTOOLCHAIN: local}
+platforms: [` + host + `]
+files: [LICENSE]
+`,
+	})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "plugin")
+
+	return root, git(t, root, "rev-parse", "HEAD")
+}
+
+func TestACommitIsBuiltOnceAndThenComesFromTheCache(t *testing.T) {
+	tool := needTool(t, goImage)
+	repo, commit := goRepo(t)
+	cache := t.TempDir()
+
+	var builds atomic.Int32
+
+	s := Store{Dir: cache, Tool: tool, OnBuild: func(string) { builds.Add(1) }}
+	p := Pin{Repository: repo, Path: "plugins/hello", Commit: commit}
+
+	r, err := s.Resolve(context.Background(), p, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.CommandContext(context.Background(), r.Program).Output()
+	if err != nil || string(out) != "hello\n" || r.Manifest.Kind != "driver" || filepath.Dir(r.Program) != r.Dir {
+		t.Fatalf("resolved %+v, which says %q: %v", r, out, err)
+	}
+
+	if _, err := os.Stat(filepath.Join(r.Dir, "LICENSE")); err != nil {
+		t.Fatal(err)
+	}
+
+	// a second resolve neither builds nor reaches the repository: a tool that isn't there and a
+	// repository that is gone change nothing
+	if err := os.RemoveAll(repo); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Store{Dir: cache, Tool: "/nonexistent/docker", OnBuild: s.OnBuild}.Resolve(context.Background(), p, host)
+	if err != nil || again.Program != r.Program {
+		t.Fatalf("again: %+v %v", again, err)
+	}
+
+	if n := builds.Load(); n != 1 {
+		t.Fatalf("%d builds, want 1", n)
+	}
+
+	if filepath.Dir(r.Dir) != cache || !sha256Hex.MatchString(filepath.Base(r.Dir)) {
+		t.Fatalf("entry %s", r.Dir)
+	}
+}
+
+func TestACommitWithoutAManifestSaysSo(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"README": "x"})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "x")
+
+	_, err := Store{Dir: t.TempDir()}.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host)
+	if !errors.Is(err, ErrNoManifest) {
+		t.Fatal(err)
+	}
+}
+
+const zipManifest = `# packed by hand
+name: hello
+kind:  driver
+program: hello
+build:
+  image: busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+  run: [sh, -c, "true"]
+platforms: [linux/amd64, linux/arm64, darwin/amd64, darwin/arm64]
+files: [LICENSE]
+`
+
+type raw struct {
+	name string
+	mode fs.FileMode
+	body string
+}
+
+func zipOf(t *testing.T, entries ...raw) []byte {
+	t.Helper()
+
+	var b bytes.Buffer
+
+	zw := zip.NewWriter(&b)
+
+	for _, e := range entries {
+		h := &zip.FileHeader{Name: e.name, Method: zip.Deflate}
+		h.SetMode(e.mode)
+
+		w, err := zw.CreateHeader(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := w.Write([]byte(e.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	return b.Bytes()
+}
+
+func goodZip(t *testing.T) []byte {
+	t.Helper()
+
+	entries := []raw{{"manifest.yaml", 0o644, zipManifest}, {"LICENSE", 0o644, "license"}}
+	for _, p := range []string{"linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64"} {
+		entries = append(entries, raw{"hello-" + p, 0o755, "binary for " + p})
+	}
+
+	return zipOf(t, entries...)
+}
+
+func sum(data []byte) string {
+	s := sha256.Sum256(data)
+
+	return hex.EncodeToString(s[:])
+}
+
+// serve serves each zip by its path, and counts the downloads.
+func serve(t *testing.T, zips map[string][]byte) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+
+	var hits atomic.Int32
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, ok := zips[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		hits.Add(1)
+
+		_, _ = w.Write(data) //nolint:errcheck // a test server
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv, &hits
+}
+
+func TestAZipIsDownloadedOnceCheckedAndUnpacked(t *testing.T) {
+	data := goodZip(t)
+	srv, hits := serve(t, map[string][]byte{"/hello.zip": data})
+	cache := t.TempDir()
+	s := Store{Dir: cache, Client: srv.Client()}
+	p := Pin{Zip: &Zip{URL: srv.URL + "/hello.zip", SHA256: sum(data)}}
+
+	for range 2 {
+		r, err := s.Resolve(context.Background(), p, "darwin/arm64")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if r.Dir != filepath.Join(cache, sum(data)) || r.Program != filepath.Join(r.Dir, "hello-darwin-arm64") || r.Manifest.Name != "hello" {
+			t.Fatalf("resolved %+v", r)
+		}
+
+		if got, _ := os.ReadFile(filepath.Join(r.Dir, "manifest.yaml")); string(got) != zipManifest { //nolint:errcheck // compared
+			t.Fatalf("manifest %q", got)
+		}
+	}
+
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d downloads, want 1", n)
+	}
+
+	if _, err := s.Resolve(context.Background(), p, "windows/amd64"); err == nil || !strings.Contains(err.Error(), "not built for windows/amd64") {
+		t.Fatal(err)
+	}
+}
+
+func TestBadZipsAreRefusedAndLeaveNothingInTheCache(t *testing.T) {
+	good := goodZip(t)
+	base := []raw{{"manifest.yaml", 0o644, zipManifest}, {"hello-" + strings.ReplaceAll(host, "/", "-"), 0o755, "bin"}}
+
+	cases := map[string]struct {
+		data   []byte
+		sum    string
+		limits bundle.Limits
+		says   string
+	}{
+		"a wrong checksum":   {good, strings.Repeat("0", 64), bundle.Limits{}, "checksum mismatch"},
+		"a path up":          {zipOf(t, append(base, raw{"../x", 0o644, "x"})...), "", bundle.Limits{}, "leaves the plugin's directory"},
+		"a symlink":          {zipOf(t, append(base, raw{"LICENSE", fs.ModeSymlink | 0o777, "/etc/passwd"})...), "", bundle.Limits{}, "is a symlink"},
+		"an extra program":   {zipOf(t, append(base, raw{"helper", 0o755, "x"})...), "", bundle.Limits{}, "no part of plugin hello"},
+		"an oversized entry": {zipOf(t, append(base, raw{"LICENSE", 0o644, strings.Repeat("x", 4096)})...), "", bundle.Limits{Bytes: 1024}, "more than 1024 bytes"},
+		"a wrapped manifest": {zipOf(t, raw{"hello/manifest.yaml", 0o644, zipManifest}, raw{"hello/hello-linux-amd64", 0o755, "x"}), "", bundle.Limits{}, "not at the top level"},
+		"no manifest":        {zipOf(t, base[1:]...), "", bundle.Limits{}, "no manifest.yaml at the top level"},
+		"not a zip":          {[]byte("<html>"), "", bundle.Limits{}, "not a valid zip"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, _ := serve(t, map[string][]byte{"/p.zip": c.data})
+			cache := t.TempDir()
+
+			want := c.sum
+			if want == "" {
+				want = sum(c.data)
+			}
+
+			_, err := Store{Dir: cache, Client: srv.Client(), Limits: c.limits}.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/p.zip", SHA256: want}}, host)
+			if err == nil || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", err, c.says)
+			}
+
+			if ents, _ := os.ReadDir(cache); len(ents) > 0 { //nolint:errcheck // an empty cache reads as empty
+				t.Fatalf("the cache holds %v", ents)
+			}
+
+			if _, err := os.Stat(filepath.Join(filepath.Dir(cache), "x")); err == nil {
+				t.Fatal("a file was written outside the cache")
+			}
+		})
+	}
+}
+
+func TestOnlyHTTPSZipsArePinned(t *testing.T) {
+	_, err := Store{Dir: t.TempDir()}.Resolve(context.Background(), Pin{Zip: &Zip{URL: "http://example.com/p.zip", SHA256: strings.Repeat("a", 64)}}, host)
+	if !errors.Is(err, ErrPin) || !strings.Contains(err.Error(), "an https URL") {
+		t.Fatal(err)
+	}
+}
+
+func TestAnAssetsOnlyPluginGoesThroughBuildZipAndCache(t *testing.T) {
+	tool := needTool(t, shImage)
+	root := t.TempDir()
+	m := `name: board
+kind: extension
+build:
+  image: ` + shImage + `
+  run: [sh, -c, "mkdir -p {out}/web/dist && cp -R src/. {out}/web/dist/"]
+platforms: [any]
+assets: [web/dist/]
+`
+	write(t, root, map[string]string{"manifest.yaml": m, "src/board.js": "customElements.define()", "src/fonts/a.woff2": "font", "src/i18n/de.json": "{}"})
+
+	out := filepath.Join(t.TempDir(), "board")
+	if _, err := build.Build(context.Background(), build.Options{Tool: tool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	var z bytes.Buffer
+	if err := bundle.Pack(out, &z); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, hits := serve(t, map[string][]byte{"/board.zip": z.Bytes()})
+	s := Store{Dir: t.TempDir(), Client: srv.Client()}
+
+	for _, platform := range []string{"linux/amd64", "darwin/arm64"} {
+		r, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/board.zip", SHA256: sum(z.Bytes())}}, platform)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if r.Program != "" || r.Manifest.Kind != "extension" {
+			t.Fatalf("resolved %+v", r)
+		}
+
+		var files []string
+
+		_ = filepath.WalkDir(r.Dir, func(p string, d fs.DirEntry, err error) error { //nolint:errcheck // compared below
+			if err == nil && !d.IsDir() {
+				rel, _ := filepath.Rel(r.Dir, p) //nolint:errcheck // under r.Dir
+				files = append(files, filepath.ToSlash(rel))
+
+				if info, _ := d.Info(); info.Mode()&0o111 != 0 { //nolint:errcheck // a file just walked
+					t.Errorf("%s is executable", rel)
+				}
+			}
+
+			return nil
+		})
+
+		want := []string{"manifest.yaml", "web/dist/board.js", "web/dist/fonts/a.woff2", "web/dist/i18n/de.json"}
+		if !slices.Equal(files, want) {
+			t.Fatalf("the plugin's directory holds %q, want %q", files, want)
+		}
+	}
+
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d downloads, want 1", n)
+	}
+}
+
+func TestTrimKeepsWhatWasUsedAndDropsTheRest(t *testing.T) {
+	data := goodZip(t)
+	srv, _ := serve(t, map[string][]byte{"/hello.zip": data})
+	cache := t.TempDir()
+	s := Store{Dir: cache, Client: srv.Client()}
+
+	r, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/hello.zip", SHA256: sum(data)}}, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	write(t, cache, map[string]string{"sources/" + strings.Repeat("b", 64): strings.Repeat("c", 64), ".new-123/x": "half"})
+
+	if removed, err := Trim(cache, time.Hour, time.Now()); err != nil || len(removed) != 1 {
+		t.Fatalf("a fresh cache lost %v: %v", removed, err)
+	}
+
+	removed, err := Trim(cache, time.Hour, time.Now().Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(r.Dir); err == nil || len(removed) != 2 {
+		t.Fatalf("an old cache kept its entry, removed %v", removed)
+	}
+}
