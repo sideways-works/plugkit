@@ -206,6 +206,7 @@ func TestUnpackRefusesUnsafeZips(t *testing.T) {
 		"too many entries":        {append(base, raw{"web/dist/a", 0o644, ""}, raw{"web/dist/b", 0o644, ""}), Limits{Entries: 3}, "more than 3"},
 		"no manifest":             {base[1:], Limits{}, "no manifest.yaml at the top level"},
 		"a wrapped manifest":      {[]raw{{"hello/manifest.yaml", 0o644, manifestText}, {"hello/hello-linux-amd64", 0o755, "bin"}}, Limits{}, "not at the top level (it is hello/manifest.yaml)"},
+		"no program":              {[]raw{{"manifest.yaml", 0o644, manifestText}, {"LICENSE", 0o644, "license"}}, Limits{}, "no file of program hello"},
 		"an entry twice":          {append(base, raw{"LICENSE", 0o644, "a"}, raw{"LICENSE", 0o644, "b"}), Limits{}, "there twice"},
 	}
 

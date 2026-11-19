@@ -232,6 +232,10 @@ func Unpack(file, dest string, limits Limits) (manifest.Manifest, error) {
 		left -= n
 	}
 
+	if m.Program != "" && !slices.ContainsFunc(m.ProgramFiles(), func(f string) bool { return seen[f] }) {
+		return manifest.Manifest{}, fmt.Errorf("%w: no file of program %s (%s)", ErrBundle, m.Program, strings.Join(m.ProgramFiles(), ", "))
+	}
+
 	return m, nil
 }
 
