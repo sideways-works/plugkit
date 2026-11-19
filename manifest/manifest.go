@@ -7,14 +7,18 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/sideways-works/plugkit/semver"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -38,7 +42,29 @@ type Manifest struct {
 	Files []string `yaml:"files"`
 	// Assets are directories the build writes under {out}, kept under the same relative paths.
 	Assets []string `yaml:"assets"`
+	// Description and Logo (a file of the plugin's directory) are for listings.
+	Description string `yaml:"description"`
+	Logo        string `yaml:"logo"`
+	// Implements and Requires are "<name> <semver range>": the interfaces the plugin offers and those
+	// it needs another plugin to offer.
+	Implements []string `yaml:"implements"`
+	Requires   []string `yaml:"requires"`
+	// Schemas, of a meta plugin alone, are its messages by name, each a JSON Schema file of the
+	// plugin's directory for the message and one for its answer.
+	Schemas map[string]Schema `yaml:"schemas"`
+	// AckTimeout, of a meta plugin alone, is a Go duration: how long a receiver has to ack or nack
+	// each message.
+	AckTimeout string `yaml:"ack_timeout"`
 }
+
+// Schema is a meta plugin's message: the JSON Schema files of the message and of its answer.
+type Schema struct {
+	Message string `yaml:"message"`
+	Answer  string `yaml:"answer"`
+}
+
+// KindMeta is a plugin of schemas alone: nothing is built and nothing runs.
+const KindMeta = "meta"
 
 type Build struct {
 	// Image is pinned by digest: name[:tag]@sha256:<64 hex>.
@@ -105,6 +131,18 @@ func (m Manifest) check() []string {
 		add("kind %q: lower case letters, digits and dashes", m.Kind)
 	}
 
+	m.checkListing(add)
+
+	if m.Kind == KindMeta {
+		m.checkMeta(add)
+
+		return bad
+	}
+
+	if len(m.Schemas) > 0 || m.AckTimeout != "" {
+		add("schemas and ack_timeout belong to a plugin of kind %s", KindMeta)
+	}
+
 	m.checkPlatforms(add)
 
 	switch {
@@ -146,6 +184,51 @@ func (m Manifest) check() []string {
 	}
 
 	return bad
+}
+
+func (m Manifest) checkListing(add func(string, ...any)) {
+	if m.Logo != "" && !localPath(m.Logo) {
+		add("logo %q: a file of the plugin's directory, without ..", m.Logo)
+	}
+
+	for key, list := range map[string][]string{"implements": m.Implements, "requires": m.Requires} {
+		for _, e := range list {
+			n, r, ok := strings.Cut(strings.TrimSpace(e), " ")
+			if _, err := semver.ParseRange(strings.TrimSpace(r)); !ok || !name.MatchString(n) || err != nil {
+				add("%s: %q: <name> <semver range>, such as \"store >=1.2 <2\"", key, e)
+			}
+		}
+	}
+}
+
+func (m Manifest) checkMeta(add func(string, ...any)) {
+	b := m.Build
+
+	switch {
+	case m.Program != "" || b.Image != "" || len(b.Run) > 0 || len(b.Env) > 0 || b.Network:
+		add("a plugin of kind %s has no build and no program", KindMeta)
+	case len(m.Platforms) > 0 && !slices.Equal(m.Platforms, []string{Any}):
+		add("a plugin of kind %s is the same on every platform: platforms [any], or none", KindMeta)
+	case len(m.Assets) > 0:
+		add("a plugin of kind %s has no assets: nothing builds them", KindMeta)
+	}
+
+	for _, n := range slices.Sorted(maps.Keys(m.Schemas)) {
+		sc := m.Schemas[n]
+		if !name.MatchString(n) || !localPath(sc.Message) || !localPath(sc.Answer) {
+			add("schemas.%s: a message's name, and its message and answer, each a file of the plugin's directory", n)
+		}
+	}
+
+	if m.AckTimeout != "" {
+		if d, err := time.ParseDuration(m.AckTimeout); err != nil || d <= 0 {
+			add("ack_timeout %q: a Go duration above zero, such as 30s", m.AckTimeout)
+		}
+	}
+}
+
+func localPath(p string) bool {
+	return relPath.MatchString(p) && !slices.Contains(strings.Split(p, "/"), "..") && !slices.Contains(strings.Split(p, "/"), ".") && p != FileName
 }
 
 func (m Manifest) checkPlatforms(add func(string, ...any)) {
@@ -199,8 +282,46 @@ func (b Build) check(anyPlatform bool, add func(string, ...any)) {
 	}
 }
 
-// AnyPlatform tells whether the plugin is built once for every platform.
-func (m Manifest) AnyPlatform() bool { return slices.Equal(m.Platforms, []string{Any}) }
+// AnyPlatform tells whether the plugin is built once for every platform, as a meta plugin is.
+func (m Manifest) AnyPlatform() bool {
+	return m.Kind == KindMeta || slices.Equal(m.Platforms, []string{Any})
+}
+
+// Extras are the files of the plugin's directory kept under their own paths beside the manifest:
+// the logo and a meta plugin's schemas.
+func (m Manifest) Extras() []string {
+	var out []string
+
+	if m.Logo != "" {
+		out = append(out, m.Logo)
+	}
+
+	for _, name := range slices.Sorted(maps.Keys(m.Schemas)) {
+		out = append(out, m.Schemas[name].Message, m.Schemas[name].Answer)
+	}
+
+	slices.Sort(out)
+
+	return slices.Compact(out)
+}
+
+// CheckSchemas reads each of a meta plugin's schema files with read and says which isn't JSON.
+func CheckSchemas(m Manifest, read func(string) ([]byte, error)) error {
+	for _, name := range slices.Sorted(maps.Keys(m.Schemas)) {
+		for _, f := range []string{m.Schemas[name].Message, m.Schemas[name].Answer} {
+			data, err := read(f)
+			if err != nil {
+				return fmt.Errorf("%w: schemas.%s: %w", ErrManifest, name, err)
+			}
+
+			if !json.Valid(data) {
+				return fmt.Errorf("%w: schemas.%s: %s is no JSON", ErrManifest, name, f)
+			}
+		}
+	}
+
+	return nil
+}
 
 // Supports tells whether the plugin is built for platform, given as os/arch.
 func (m Manifest) Supports(osArch string) bool {

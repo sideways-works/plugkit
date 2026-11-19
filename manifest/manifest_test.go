@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -101,5 +102,74 @@ func TestManifestsAreRefused(t *testing.T) {
 
 	if _, err := Parse(nil); !errors.Is(err, ErrManifest) {
 		t.Fatalf("empty: %v", err)
+	}
+}
+
+const meta = `name: store
+kind: meta
+description: The store a step writes its results to
+logo: logo.svg
+implements: ["store >=1.0 <2"]
+schemas:
+  put: {message: schemas/put.json, answer: schemas/put-answer.json}
+ack_timeout: 30s
+`
+
+func TestAMetaPluginIsSchemasAlone(t *testing.T) {
+	m, err := Parse([]byte(meta))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !m.AnyPlatform() || !m.Supports("darwin/arm64") || len(m.ProgramFiles()) != 0 || m.Schemas["put"].Answer != "schemas/put-answer.json" {
+		t.Fatalf("meta: %+v", m)
+	}
+
+	if got := m.Extras(); !slices.Equal(got, []string{"logo.svg", "schemas/put-answer.json", "schemas/put.json"}) {
+		t.Fatalf("extras %v", got)
+	}
+
+	files := map[string]string{"schemas/put.json": `{"type": "object"}`, "schemas/put-answer.json": "{}"}
+	read := func(f string) ([]byte, error) { return []byte(files[f]), nil }
+
+	if err := CheckSchemas(m, read); err != nil {
+		t.Fatal(err)
+	}
+
+	files["schemas/put.json"] = "type: object"
+
+	if err := CheckSchemas(m, read); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), "schemas/put.json is no JSON") {
+		t.Fatal(err)
+	}
+}
+
+func TestListingFieldsAndMetaKeysAreRefused(t *testing.T) {
+	cases := map[string]struct{ text, says string }{
+		"a meta plugin's build":      {meta + "build: {image: " + image + ", run: [true]}\n", "has no build and no program"},
+		"a meta plugin's program":    {meta + "program: store\n", "has no build and no program"},
+		"a meta plugin's platform":   {meta + "platforms: [linux/amd64]\n", "platforms [any], or none"},
+		"a schema up":                {strings.Replace(meta, "schemas/put.json", "../put.json", 1), "schemas.put"},
+		"a bad ack timeout":          {strings.Replace(meta, "30s", "soon", 1), "ack_timeout"},
+		"a zero ack timeout":         {strings.Replace(meta, "30s", "0s", 1), "ack_timeout"},
+		"a bad range":                {strings.Replace(meta, ">=1.0 <2", "^1.0", 1), "<name> <semver range>"},
+		"a requirement without one":  {meta + "requires: [store]\n", "<name> <semver range>"},
+		"a logo up":                  {strings.Replace(meta, "logo.svg", "../logo.svg", 1), "logo"},
+		"schemas on a driver":        {good + "schemas:\n  put: {message: a.json, answer: b.json}\n", "belong to a plugin of kind meta"},
+		"an ack timeout on a driver": {good + "ack_timeout: 1s\n", "belong to a plugin of kind meta"},
+		"an unknown schema key":      {strings.Replace(meta, "answer: schemas/put-answer.json", "answer: schemas/put-answer.json, error: e.json", 1), "field error not found"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(c.text))
+			if !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", err, c.says)
+			}
+		})
+	}
+
+	withListing := good + "description: Builds Go\nlogo: docs/logo.svg\nrequires: [\"store >=1.2 <2 || >=3\"]\n"
+	if m, err := Parse([]byte(withListing)); err != nil || m.Description != "Builds Go" || len(m.Extras()) != 1 {
+		t.Fatalf("a driver with a listing: %+v %v", m, err)
 	}
 }
