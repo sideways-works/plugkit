@@ -400,7 +400,7 @@ func TestTrimKeepsWhatWasUsedAndDropsTheRest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	write(t, cache, map[string]string{"sources/" + strings.Repeat("b", 64): strings.Repeat("c", 64), ".new-123/x": "half"})
+	write(t, cache, map[string]string{".sources/" + strings.Repeat("b", 64): strings.Repeat("c", 64), ".new-123/x": "half"})
 
 	if removed, err := Trim(cache, time.Hour, time.Now()); err != nil || len(removed) != 1 {
 		t.Fatalf("a fresh cache lost %v: %v", removed, err)
@@ -413,5 +413,74 @@ func TestTrimKeepsWhatWasUsedAndDropsTheRest(t *testing.T) {
 
 	if _, err := os.Stat(r.Dir); err == nil || len(removed) != 2 {
 		t.Fatalf("an old cache kept its entry, removed %v", removed)
+	}
+}
+
+// A host gives each plugin a directory of its name beside the store's entries: the store's own
+// directories take no name a plugin can have, so plugins named git and sources keep theirs.
+func TestPluginsNamedGitAndSourcesKeepTheirDirectoriesBesideTheStore(t *testing.T) {
+	tool := needTool(t, shImage)
+
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"hello.sh": "#!/bin/sh\necho hello\n",
+		"manifest.yaml": `name: hello
+kind: driver
+program: hello
+build:
+  image: ` + shImage + `
+  run: [sh, -c, "cp hello.sh {out}/hello"]
+platforms: [` + host + `]
+`,
+	})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "plugin")
+
+	data := goodZip(t)
+	srv, _ := serve(t, map[string][]byte{"/hello.zip": data})
+
+	cache := t.TempDir()
+	write(t, cache, map[string]string{"git/scratch": "the git plugin's", "sources/scratch": "the sources plugin's"})
+
+	s := Store{Dir: cache, Tool: tool, Client: srv.Client()}
+
+	if _, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/hello.zip", SHA256: sum(data)}}, host); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, d := range []string{"git", "sources"} {
+		ents, err := os.ReadDir(filepath.Join(cache, d))
+		if err != nil || len(ents) != 1 || ents[0].Name() != "scratch" {
+			t.Fatalf("%s/ holds %v: %v", d, ents, err)
+		}
+	}
+
+	if _, err := Trim(cache, time.Hour, time.Now().Add(48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	ents, err := os.ReadDir(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var left []string
+	for _, e := range ents {
+		left = append(left, e.Name())
+	}
+
+	if !slices.Equal(left, []string{".git-clones", ".sources", "git", "sources"}) {
+		t.Fatalf("after the trim the cache holds %v", left)
+	}
+
+	for _, f := range []string{"git/scratch", "sources/scratch"} {
+		if _, err := os.Stat(filepath.Join(cache, f)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

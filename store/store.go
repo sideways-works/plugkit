@@ -1,7 +1,9 @@
 // Package store resolves a plugin pinned by commit or by zip to a directory of the cache holding
 // it as its zip does: manifest.yaml, the program and the assets. A commit is built from its
 // manifest once per platform, a zip downloaded and checked once; the same key never builds or
-// downloads twice, and every entry appears whole, by a rename.
+// downloads twice, and every entry appears whole, by a rename. Besides the entries, named by their
+// 64-hex keys, the store keeps only names that start with a dot, so a host may give each plugin a
+// directory of its name beside them as long as no plugin's name starts with one.
 package store
 
 import (
@@ -74,6 +76,13 @@ type Store struct {
 var (
 	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	commitID  = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
+
+// The store's own directories: the bare repositories commits are fetched into, and the files that
+// name a commit's build by its source, so a resolve finds it without fetching.
+const (
+	mirrorsDir = ".git-clones"
+	aliasesDir = ".sources"
 )
 
 // maxZip bounds a download, so a wrong URL can't fill the disk.
@@ -185,7 +194,7 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		return Resolved{}, fmt.Errorf("%w: commit %q: 40 hex digits", ErrPin, p.Commit)
 	}
 
-	alias := filepath.Join(s.Dir, "sources", hexSum("source\x00"+p.Repository+"\x00"+p.Commit+"\x00"+p.Path+"\x00"+osArch))
+	alias := filepath.Join(s.Dir, aliasesDir, hexSum("source\x00"+p.Repository+"\x00"+p.Commit+"\x00"+p.Path+"\x00"+osArch))
 	if key, err := os.ReadFile(alias); err == nil && sha256Hex.Match(key) { //nolint:gosec // the cache's own file
 		if r, err := s.found(filepath.Join(s.Dir, string(key)), osArch); err == nil {
 			return r, nil
@@ -337,7 +346,7 @@ func (s Store) found(entry, osArch string) (Resolved, error) {
 
 // mirror is the cache's bare repository of repository holding commit, fetched only when it doesn't.
 func (s Store) mirror(ctx context.Context, repository, commit string) (string, error) {
-	dir := filepath.Join(s.Dir, "git", hexSum(repository)[:24])
+	dir := filepath.Join(s.Dir, mirrorsDir, hexSum(repository)[:24])
 
 	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
 		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
@@ -519,7 +528,8 @@ func hexSum(s string) string {
 
 // Trim removes what dir holds that no resolve used for longer than keep: the entries, as
 // fetch.Trim removes a release's files beside them, then the names of builds whose entry is gone,
-// the repositories no build fetched from, and what an interrupted resolve left.
+// the repositories no build fetched from, and what an interrupted resolve left. It reads dir as
+// holding the store's and fetch's files alone, so a host trims its plugins' directories otherwise.
 func Trim(dir string, keep time.Duration, now time.Time) ([]string, error) {
 	removed, err := fetch.Trim(dir, keep, now)
 	if err != nil {
@@ -542,9 +552,9 @@ func Trim(dir string, keep time.Duration, now time.Time) ([]string, error) {
 		return nil
 	}
 
-	aliases, _ := os.ReadDir(filepath.Join(dir, "sources")) //nolint:errcheck // none yet
+	aliases, _ := os.ReadDir(filepath.Join(dir, aliasesDir)) //nolint:errcheck // none yet
 	for _, a := range aliases {
-		p := filepath.Join(dir, "sources", a.Name())
+		p := filepath.Join(dir, aliasesDir, a.Name())
 
 		key, err := os.ReadFile(p) //nolint:gosec // the cache's own file
 		if err != nil || !sha256Hex.Match(key) || !exists(filepath.Join(dir, string(key))) {
@@ -554,11 +564,13 @@ func Trim(dir string, keep time.Duration, now time.Time) ([]string, error) {
 		}
 	}
 
-	for _, sub := range []string{"git", "."} {
+	for _, sub := range []string{mirrorsDir, "."} {
 		ents, _ := os.ReadDir(filepath.Join(dir, sub)) //nolint:errcheck // none yet
 		for _, e := range ents {
 			p := filepath.Join(dir, sub, e.Name())
-			if (sub == "git" || strings.HasPrefix(e.Name(), ".")) && old(p) {
+			own := sub == mirrorsDir || strings.HasPrefix(e.Name(), ".") && e.Name() != mirrorsDir && e.Name() != aliasesDir
+
+			if own && old(p) {
 				if err := drop(p); err != nil {
 					return removed, err
 				}
