@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,9 +16,32 @@ import (
 
 var ErrURL = errors.New("not a remote git may fetch from")
 
-// SSHCommand is ssh with none of the host's keys, agent, config or prompts: ssh reads ~/.ssh even
-// when HOME is moved, so the options say it.
-const SSHCommand = "ssh -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes -F /dev/null"
+// KnownHosts is the known_hosts file in home that ssh checks a host's key against.
+const KnownHosts = "known_hosts"
+
+// SSHCommand is ssh with none of the account's keys, agent, config, known hosts or prompts, and
+// the known hosts of home alone, which a host key must be in: ssh reads ~/.ssh even when HOME is
+// moved, so the options say it.
+func SSHCommand(home string) string {
+	return "ssh -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes -F /dev/null" +
+		" -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile='" + filepath.Join(home, KnownHosts) + "' -o StrictHostKeyChecking=yes"
+}
+
+var errHome = errors.New("a home whose path holds a quote")
+
+// Prepare writes home's known_hosts with the caller's lines: without any, ssh knows no host and an
+// ssh remote fails closed.
+func Prepare(home, knownHosts string) error {
+	if strings.ContainsAny(home, "'\n") {
+		return fmt.Errorf("%w: %q", errHome, home)
+	}
+
+	if err := os.WriteFile(filepath.Join(home, KnownHosts), []byte(knownHosts), 0o600); err != nil {
+		return fmt.Errorf("known hosts: %w", err)
+	}
+
+	return nil
+}
 
 // scp is git's scp-like form, [user@]host:path, whose host has no slash before the colon.
 var scp = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+):(.+)$`)
@@ -90,7 +115,7 @@ func Env(base []string, home, remote string, cred Credential) []string {
 		"HOME="+home, "XDG_CONFIG_HOME="+home,
 		"GIT_ALLOW_PROTOCOL=https:ssh", "GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_SSH_COMMAND="+SSHCommand,
+		"GIT_SSH_COMMAND="+SSHCommand(home),
 	)
 
 	// a redirect could take the fetch, and a credential, to another host

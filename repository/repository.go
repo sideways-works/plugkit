@@ -173,6 +173,9 @@ type Options struct {
 	// the only credential, and the fetches bounded by Timeout and MaxBytes.
 	Untrusted  bool
 	Credential gitsafe.Credential
+	// KnownHosts are the known_hosts lines ssh checks an untrusted ssh remote's host key against;
+	// without them every ssh remote fails, as no host key comes from the account's own.
+	KnownHosts string
 	// Timeout bounds List or At, MaxBytes what its fetches write; with Untrusted, 0 is 2 minutes and
 	// 256 MiB.
 	Timeout  time.Duration
@@ -375,6 +378,12 @@ func newGit(ctx context.Context, url string, opt Options) (*git, error) {
 	if opt.Untrusted {
 		home := filepath.Join(dir, "home")
 		if err := os.Mkdir(home, 0o700); err != nil {
+			g.close()
+
+			return nil, fmt.Errorf("%w: %w", ErrRepository, err)
+		}
+
+		if err := gitsafe.Prepare(home, opt.KnownHosts); err != nil {
 			g.close()
 
 			return nil, fmt.Errorf("%w: %w", ErrRepository, err)

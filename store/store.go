@@ -80,6 +80,9 @@ type Store struct {
 	// keys, and Credential as the only credential; GitEnv is left out.
 	Untrusted  bool
 	Credential gitsafe.Credential
+	// KnownHosts are as repository.Options.KnownHosts: an untrusted ssh repository's host key must be
+	// in them.
+	KnownHosts string
 	// home is git's HOME with Untrusted, an empty directory of the store's own, and remote the
 	// repository it fetches from.
 	home, remote string
@@ -223,6 +226,10 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
 		}
 		defer os.RemoveAll(home) //nolint:errcheck // an empty scratch home
+
+		if err := gitsafe.Prepare(home, s.KnownHosts); err != nil {
+			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
+		}
 
 		s.home, s.remote = home, p.Repository
 	}

@@ -279,7 +279,7 @@ func TestAnUntrustedURLIsRefusedBeforeGitRuns(t *testing.T) {
 func TestAnUntrustedSSHRemoteGetsNoneOfTheHostsSSH(t *testing.T) {
 	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "ssh.log")
 
-	fake := "#!/bin/sh\n{ printf '%s\\n' \"$@\"; env; } > " + log + "\nexit 1\n"
+	fake := "#!/bin/sh\n{ printf '%s\\n' \"$@\"; env; for a in \"$@\"; do case \"$a\" in UserKnownHostsFile=*) echo \"known<$(cat \"${a#UserKnownHostsFile=}\")>\";; esac; done; } > " + log + "\nexit 1\n"
 	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(fake), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestAnUntrustedSSHRemoteGetsNoneOfTheHostsSSH(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "/host/agent")
 	t.Setenv("GIT_CONFIG_GLOBAL", "/host/gitconfig")
 
-	opt := Options{Untrusted: true, env: []string{"PATH=" + bin + ":" + os.Getenv("PATH")}}
+	opt := Options{Untrusted: true, KnownHosts: "plugins.example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKnown", env: []string{"PATH=" + bin + ":" + os.Getenv("PATH")}}
 	if _, err := List(context.Background(), "ssh://git@plugins.example.invalid/o/r.git", opt); err == nil {
 		t.Fatal("the stand-in ssh fetched something")
 	}
@@ -299,14 +299,25 @@ func TestAnUntrustedSSHRemoteGetsNoneOfTheHostsSSH(t *testing.T) {
 
 	got := string(data)
 	for _, want := range []string{"IdentitiesOnly=yes\n", "IdentityFile=/dev/null\n", "BatchMode=yes\n", "-F\n/dev/null\n", "git@plugins.example.invalid\n",
-		"GIT_CONFIG_GLOBAL=/dev/null\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_ALLOW_PROTOCOL=https:ssh\n"} {
+		"GIT_CONFIG_GLOBAL=/dev/null\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_ALLOW_PROTOCOL=https:ssh\n",
+		"StrictHostKeyChecking=yes\n", "GlobalKnownHostsFile=/dev/null\n", "known<plugins.example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKnown>\n"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("ssh saw no %q:\n%s", want, got)
 		}
 	}
 
-	if strings.Contains(got, "SSH_AUTH_SOCK") || strings.Contains(got, "/host/gitconfig") {
-		t.Errorf("ssh saw the host's agent or config:\n%s", got)
+	if strings.Contains(got, "SSH_AUTH_SOCK") || strings.Contains(got, "/host/gitconfig") || strings.Contains(got, "/.ssh/known_hosts") {
+		t.Errorf("ssh saw the host's agent, config or known hosts:\n%s", got)
+	}
+
+	// without known hosts of the caller's, ssh knows no host at all
+	opt.KnownHosts = ""
+	if _, err := List(context.Background(), "ssh://git@plugins.example.invalid/o/r.git", opt); err == nil {
+		t.Fatal("the stand-in ssh fetched something")
+	}
+
+	if data, err := os.ReadFile(log); err != nil || !strings.Contains(string(data), "known<>\n") {
+		t.Fatalf("known hosts with none given: %v\n%s", err, data)
 	}
 }
 

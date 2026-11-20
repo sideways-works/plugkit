@@ -32,7 +32,7 @@ func TestTheEnvironmentKeepsTheHostsGitOut(t *testing.T) {
 
 	env := Env(base, "/scratch/home", "https://github.com/o/r", Credential{})
 	for _, want := range []string{"PATH=/usr/bin", "LANG=C", "HOME=/scratch/home", "GIT_CONFIG_KEY_0=http.followRedirects", "GIT_CONFIG_VALUE_0=false", "GIT_ALLOW_PROTOCOL=https:ssh", "GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_SSH_COMMAND=" + SSHCommand} {
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_SSH_COMMAND=" + SSHCommand("/scratch/home")} {
 		if !slices.Contains(env, want) {
 			t.Errorf("no %s in %q", want, env)
 		}

@@ -197,9 +197,12 @@ option, a transport helper (`ext::` or any `::`), `file://` and a local
 path are refused, and the URL always follows `--`. git gets none of the
 host's config, credential helpers, `url.insteadOf` or ssh keys
 (`GIT_CONFIG_GLOBAL=/dev/null`, no system config, ssh with no identity,
-agent or config file, https and ssh only), and the caller's
-`Credential`, a token handed to a one-shot helper through the environment,
-never in the URL or an argument, is the only credential. `List` and `At`
+agent, config file or known hosts, https and ssh only, no redirect
+followed), and the caller's `Credential`, a token handed to a one-shot
+helper through the environment, never in the URL or an argument, is the
+only credential; git gets it only for https on the credential's host. An
+ssh remote's host key must be in the caller's `KnownHosts`: without them,
+every ssh remote fails. `List` and `At`
 then also stop after `Timeout` and once their fetches write more than
 `MaxBytes`. Unset, git runs with the host's credentials, as a CI job needs.
 
