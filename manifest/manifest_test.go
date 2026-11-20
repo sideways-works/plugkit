@@ -457,3 +457,24 @@ func TestSpecsAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// A logo is a file of the plugin's directory or an https URL, which is no file the plugin holds.
+func TestALogoMayBeAnHTTPSURL(t *testing.T) {
+	m, err := Parse([]byte(included + "logo: https://example.com/logos/cache.svg?v=2\n"))
+	if err != nil || len(m.Extras()) != 0 || !LogoURL(m.Logo) {
+		t.Fatalf("%+v %v", m, err)
+	}
+
+	for logo, says := range map[string]string{
+		"http://example.com/cache.svg":                     "an https URL with a host",
+		"https:///cache.svg":                               "an https URL with a host",
+		"https://me@example.com/cache.svg":                 "no user or password",
+		"ftp://example.com/cache.svg":                      "an https URL",
+		"https://example.com/" + strings.Repeat("a", 2100): "at most 2048 bytes",
+		"https:cache.svg":                                  "or an https URL",
+	} {
+		if _, err := Parse([]byte(included + "logo: \"" + logo + "\"\n")); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
+			t.Errorf("logo %.40q: got %v, want %q", logo, err, says)
+		}
+	}
+}

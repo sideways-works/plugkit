@@ -175,7 +175,7 @@ r, err := s.Resolve(ctx, store.Pin{Zip: &store.Zip{URL: url, SHA256: sum}}, "lin
 ```
 
 A plugin manifest may also carry what a listing shows, `description` and
-`logo` (a file of the plugin's directory), and what the plugin offers and
+`logo` (a file of the plugin's directory, or an `https://` URL), and what the plugin offers and
 needs, `implements` and `requires`, each a list of `"<name> <semver range>"`.
 A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 `schemas`, a JSON Schema file for each message and one for its answer, with
@@ -236,6 +236,20 @@ PNG, JPEG or WebP image of at most 256 KiB, by its content. `At` reads a
 version's manifest at the commit its tag names, and refuses a tag that
 names another commit when read again after the fetch, or another than
 `Options.Commit`.
+
+A logo given as a URL is fetched by `List` and `AtRelease` (`At` with the
+version's logo), so a host gets `LogoData` and `LogoType` and fetches
+nothing itself. Manifests are untrusted, so the fetch is https alone, with
+no credential, cookie, proxy or redirect, within 10 seconds and 256 KiB,
+and its dialer refuses every loopback, private, link-local (169.254.169.254
+among them), CGNAT, unspecified, multicast and reserved address, checked
+at connect time on the address the name resolved to, so a name that
+resolves elsewhere the second time gets no further. `Options.LogoCache`, a
+directory, keeps each fetched logo by its URL and the plugin's version;
+without one, every listing fetches again. A logo that fails to fetch, or is
+no SVG, PNG, JPEG or WebP image, sets `LogoErr` and never fails the plugin.
+An SVG logo, from a file or a URL, is the plugin author's markup: a host
+sanitizes it before rendering it.
 
 ```yaml
 repository: 1                   # the format; another is refused

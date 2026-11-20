@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -51,7 +52,7 @@ type Manifest struct {
 	// the same relative paths, after the build if there is one. A plugin with no program may have
 	// no build at all: then nothing runs.
 	Include []string `yaml:"include"`
-	// Description and Logo (a file of the plugin's directory) are for listings.
+	// Description and Logo, a file of the plugin's directory or an https URL, are for listings.
 	Description string `yaml:"description"`
 	Logo        string `yaml:"logo"`
 	// Implements and Requires are "<name> <semver range>": the interfaces the plugin offers and those
@@ -337,8 +338,14 @@ func (m Manifest) checkLayout(add func(string, ...any)) {
 }
 
 func (m Manifest) checkListing(add func(string, ...any)) {
-	if m.Logo != "" && !localPath(m.Logo) {
-		add("logo %q: a file of the plugin's directory, without ..", m.Logo)
+	switch {
+	case m.Logo == "" || localPath(m.Logo):
+	case strings.Contains(m.Logo, "://"):
+		if !LogoURL(m.Logo) {
+			add("logo %q: an https URL with a host and no user or password, at most %d bytes", m.Logo, maxLogoURL)
+		}
+	default:
+		add("logo %q: a file of the plugin's directory, without .., or an https URL", m.Logo)
 	}
 
 	for key, list := range map[string][]string{"implements": m.Implements, "requires": m.Requires} {
@@ -429,6 +436,17 @@ func (m Manifest) checkMeta(add func(string, ...any)) {
 	}
 }
 
+// maxLogoURL bounds a logo's URL.
+const maxLogoURL = 2048
+
+// LogoURL tells whether logo is an https URL, which a listing fetches, rather than a file of the
+// plugin's directory.
+func LogoURL(logo string) bool {
+	u, err := url.Parse(logo)
+
+	return err == nil && len(logo) <= maxLogoURL && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Opaque == ""
+}
+
 func localPath(p string) bool {
 	return relPath.MatchString(p) && !slices.Contains(strings.Split(p, "/"), "..") && !slices.Contains(strings.Split(p, "/"), ".") && p != FileName
 }
@@ -490,11 +508,11 @@ func (m Manifest) AnyPlatform() bool {
 }
 
 // Extras are the files of the plugin's directory kept under their own paths beside the manifest:
-// the logo and a meta plugin's schemas.
+// the logo, unless it is a URL, and a meta plugin's schemas.
 func (m Manifest) Extras() []string {
 	var out []string
 
-	if m.Logo != "" {
+	if m.Logo != "" && !LogoURL(m.Logo) {
 		out = append(out, m.Logo)
 	}
 

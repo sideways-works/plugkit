@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -156,8 +157,10 @@ func local(p string) bool {
 // why its manifest couldn't be read, and the listing holds the other plugins all the same.
 type Plugin struct {
 	Path, Name, Kind, Description, Logo string
-	// LogoData is the logo's content and LogoType its media type: an SVG, PNG, JPEG or WebP image
-	// of at most MaxLogo bytes, by its content. LogoErr says why there is none.
+	// Logo is a file of the repository or an https URL. LogoData is the logo's content and LogoType
+	// its media type: an SVG, PNG, JPEG or WebP image of at most MaxLogo bytes, by its content.
+	// LogoErr says why there is none; it never fails the plugin. An SVG is the plugin author's, and
+	// a host sanitizes it before rendering it.
 	LogoData []byte
 	LogoType string
 	LogoErr  error
@@ -203,12 +206,18 @@ type Options struct {
 	MaxBytes int64
 	// Commit is the commit At must find the version's tag naming, when the caller knows it.
 	Commit string
-	// AllowLocal lets an untrusted URL be file:// or a local path: for tests alone, as a local path
-	// reads the host's own files.
+	// AllowLocal lets an untrusted URL be file:// or a local path, and a logo's URL reach a
+	// loopback address: for tests alone, as a local path reads the host's own files and loopback
+	// reaches its own services.
 	AllowLocal bool
+	// LogoCache is a directory that keeps the logos fetched from a URL, by the URL and the
+	// plugin's version, so a listing doesn't fetch them again; without one, each listing does.
+	LogoCache string
 
 	// env is added last, for tests that must give git what Untrusted takes away.
 	env []string
+	// roots are the certificates a logo's server is checked against, for tests; nil is the system's.
+	roots *x509.CertPool
 }
 
 const (
@@ -283,6 +292,16 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 			}
 		}
 
+		if p.Err == nil && p.Logo != "" {
+			// a logo's URL is fetched once for each version: the newest, or with none the commit
+			version := head
+			if len(p.Versions) > 0 {
+				version = p.Versions[0].Version
+			}
+
+			p.LogoData, p.LogoType, p.LogoErr = g.logo(ctx, head, p.Logo, version, opt)
+		}
+
 		out = append(out, p)
 	}
 
@@ -296,16 +315,16 @@ func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo, Err: err}
 	}
 
-	if p.Logo != "" {
-		p.LogoData, p.LogoType, p.LogoErr = g.logo(ctx, commit, p.Logo)
-	}
-
 	return p
 }
 
-// logo is the image at name and its media type: SVG, PNG, JPEG or WebP by its content, within
-// MaxLogo bytes.
-func (g *git) logo(ctx context.Context, commit, name string) ([]byte, string, error) {
+// logo is the image at name, a file of the repository at commit or an https URL fetched for
+// version, and its media type: SVG, PNG, JPEG or WebP by its content, within MaxLogo bytes.
+func (g *git) logo(ctx context.Context, commit, name, version string, opt Options) ([]byte, string, error) {
+	if manifest.LogoURL(name) {
+		return fetchLogo(ctx, name, version, opt)
+	}
+
 	size, err := g.run(ctx, "cat-file", "-s", commit+":"+name)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, name, err)
@@ -347,43 +366,66 @@ func imageType(data []byte) string {
 // for version names, and that commit. It refuses a tag that names another commit once read than it
 // did when fetched, and one that names another commit than opt.Commit when that is set.
 func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Manifest, string, error) {
+	r, err := at(ctx, url, dir, version, opt, false)
+
+	return r.Manifest, r.Commit, err
+}
+
+// Release is a version of a plugin: its manifest and commit as At reads them, and its logo as a
+// listing gives it, LogoErr saying why there is none.
+type Release struct {
+	Manifest manifest.Manifest
+	Commit   string
+	Logo     string
+	LogoData []byte
+	LogoType string
+	LogoErr  error
+}
+
+// AtRelease is At with the version's logo: a file of the repository at the version's commit, or
+// an https URL fetched as List fetches it.
+func AtRelease(ctx context.Context, url, dir, version string, opt Options) (Release, error) {
+	return at(ctx, url, dir, version, opt, true)
+}
+
+func at(ctx context.Context, url, dir, version string, opt Options, withLogo bool) (Release, error) {
 	g, ctx, cancel, err := open(ctx, url, opt)
 	if err != nil {
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	}
 	defer cancel()
 	defer g.close()
 
 	head, err := g.fetch(ctx, url, "HEAD")
 	if err != nil {
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	}
 
 	r, err := g.repository(ctx, head)
 	if err != nil {
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	}
 
 	i := slices.IndexFunc(r.Plugins, func(e Entry) bool { return e.Path() == path.Clean(dir) })
 	if i < 0 {
-		return manifest.Manifest{}, "", fmt.Errorf("%w: %s lists no plugin at %s", ErrRepository, url, dir)
+		return Release{}, fmt.Errorf("%w: %s lists no plugin at %s", ErrRepository, url, dir)
 	}
 
 	p, err := g.plugin(ctx, head, r.Plugins[i])
 	if err != nil {
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	}
 
 	tag := strings.NewReplacer("{name}", p.Name, "{path}", p.Path, "{version}", strings.TrimPrefix(version, "v")).Replace(r.Tags)
 
 	commit, err := g.fetch(ctx, url, "refs/tags/"+tag)
 	if err != nil {
-		return manifest.Manifest{}, "", fmt.Errorf("%w: %s has no tag %s for version %s of %s: %w", ErrRepository, url, tag, version, p.Name, err)
+		return Release{}, fmt.Errorf("%w: %s has no tag %s for version %s of %s: %w", ErrRepository, url, tag, version, p.Name, err)
 	}
 
 	m, err := g.manifest(ctx, commit, r.Plugins[i].Manifest)
 	if err != nil {
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	}
 
 	beforeRecheck()
@@ -393,14 +435,32 @@ func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Ma
 
 	switch {
 	case err != nil:
-		return manifest.Manifest{}, "", err
+		return Release{}, err
 	case now[tag] != commit:
-		return manifest.Manifest{}, "", fmt.Errorf("%w: %s's tag %s named %s when fetched and names %q now", ErrMoved, url, tag, commit, now[tag])
+		return Release{}, fmt.Errorf("%w: %s's tag %s named %s when fetched and names %q now", ErrMoved, url, tag, commit, now[tag])
 	case opt.Commit != "" && opt.Commit != commit:
-		return manifest.Manifest{}, "", fmt.Errorf("%w: %s's tag %s names %s, not %s", ErrMoved, url, tag, commit, opt.Commit)
+		return Release{}, fmt.Errorf("%w: %s's tag %s names %s, not %s", ErrMoved, url, tag, commit, opt.Commit)
 	}
 
-	return m, commit, nil
+	rel := Release{Manifest: m, Commit: commit, Logo: logoOf(r.Plugins[i], m)}
+	if withLogo && rel.Logo != "" {
+		rel.LogoData, rel.LogoType, rel.LogoErr = g.logo(ctx, commit, rel.Logo, strings.TrimPrefix(version, "v"), opt)
+	}
+
+	return rel, nil
+}
+
+// logoOf is the logo a listing shows of e: the repository manifest's, a file named from the
+// repository's root, or else the plugin manifest's, a file of its directory or a URL.
+func logoOf(e Entry, m manifest.Manifest) string {
+	switch {
+	case e.Logo != "" || m.Logo == "":
+		return e.Logo
+	case manifest.LogoURL(m.Logo):
+		return m.Logo
+	}
+
+	return path.Join(e.Path(), m.Logo)
 }
 
 // versions are the tags of p that pattern names, newest first.
@@ -643,9 +703,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		p.Description = m.Description
 	}
 
-	if p.Logo == "" && m.Logo != "" {
-		p.Logo = path.Join(p.Path, m.Logo)
-	}
+	p.Logo = logoOf(e, m)
 
 	return p, nil
 }

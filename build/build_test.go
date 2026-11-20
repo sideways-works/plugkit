@@ -488,3 +488,20 @@ func files(t *testing.T, dir string) []string {
 
 	return got
 }
+
+// A logo's URL is no file of the plugin's directory: nothing is copied for it.
+func TestALogosURLIsNoFileToCopy(t *testing.T) {
+	m := includedManifest + "logo: https://example.com/cache.svg\n"
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": m, "service.yaml": "s", "conf/cache.conf": "c"})
+	checkout(t, root)
+
+	out := filepath.Join(t.TempDir(), "cache")
+	if _, err := Build(context.Background(), Options{Tool: noTool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := files(t, out); !slices.Equal(got, []string{"conf/cache.conf", "manifest.yaml", "service.yaml"}) {
+		t.Fatalf("layout %q", got)
+	}
+}
