@@ -249,3 +249,30 @@ func TestPermissionsAreRefused(t *testing.T) {
 		})
 	}
 }
+
+func TestARuntimeNamesWhatRunsTheProgram(t *testing.T) {
+	for text, want := range map[string][2]string{
+		"runtime: node\n":              {"node", ""},
+		"runtime: \"node >=22 <27\"\n": {"node", ">=22 <27"},
+		"":                             {"", ""},
+	} {
+		m, err := Parse([]byte(good + text))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if n, r := m.RuntimeOf(); n != want[0] || r != want[1] {
+			t.Errorf("%q: %q %q", text, n, r)
+		}
+	}
+
+	for text, says := range map[string]string{
+		good + "runtime: Node\n":         `runtime "Node": a name`,
+		good + "runtime: \"node ^22\"\n": `runtime "node ^22"`,
+		meta + "runtime: node\n":         "only a plugin with a program has a runtime",
+	} {
+		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: got %v, want %q", text, err, says)
+		}
+	}
+}

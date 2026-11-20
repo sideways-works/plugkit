@@ -35,7 +35,10 @@ type Manifest struct {
 	Kind string `yaml:"kind"`
 	// Program is the executable the build writes into {out}: <program>, or <program>.mjs for a
 	// Node plugin. It may be left out only with platforms [any], for a plugin of assets alone.
-	Program   string   `yaml:"program"`
+	Program string `yaml:"program"`
+	// Runtime is what runs the program besides the machine itself, with an optional semver range:
+	// node for a <program>.mjs, "node >=22 <27". Empty means a native binary.
+	Runtime   string   `yaml:"runtime"`
 	Build     Build    `yaml:"build"`
 	Platforms []string `yaml:"platforms"`
 	// Files are copied from the plugin's directory to the top level, beside the program.
@@ -146,6 +149,7 @@ func (m Manifest) check() []string {
 
 	m.checkListing(add)
 	m.checkPermissions(add)
+	m.checkRuntime(add)
 
 	if m.Kind == KindMeta {
 		m.checkMeta(add)
@@ -216,6 +220,33 @@ func (m Manifest) checkListing(add func(string, ...any)) {
 				add("%s: %q: <name> <semver range>, such as \"store >=1.2 <2\"", key, e)
 			}
 		}
+	}
+}
+
+// RuntimeOf is the runtime's name and its version range, empty when the manifest names none.
+func (m Manifest) RuntimeOf() (string, string) {
+	n, r, _ := strings.Cut(strings.TrimSpace(m.Runtime), " ")
+
+	return n, strings.TrimSpace(r)
+}
+
+func (m Manifest) checkRuntime(add func(string, ...any)) {
+	if m.Runtime == "" {
+		return
+	}
+
+	n, r := m.RuntimeOf()
+
+	if !name.MatchString(n) {
+		add("runtime %q: a name, such as node, and an optional semver range", m.Runtime)
+	} else if r != "" {
+		if _, err := semver.ParseRange(r); err != nil {
+			add("runtime %q: %v", m.Runtime, err)
+		}
+	}
+
+	if m.Program == "" {
+		add("runtime %q: only a plugin with a program has a runtime", m.Runtime)
 	}
 }
 
