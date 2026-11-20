@@ -11,6 +11,7 @@ const image = "golang:1.25.7-bookworm@sha256:564e366a28ad1d70f460a2b97d1d299a562
 
 const good = `name: go-driver
 kind: driver
+for: test
 program: go-driver
 build:
   image: ` + image + `
@@ -50,6 +51,7 @@ func TestAManifestReadsWithItsProgramFilesAndImage(t *testing.T) {
 func TestAnAssetsOnlyPluginIsBuiltForAnyPlatform(t *testing.T) {
 	m, err := Parse([]byte(`name: board
 kind: extension
+for: test
 build:
   image: busybox@sha256:` + strings.Repeat("a", 64) + `
   run: [sh, -c, "cp -r web {out}/dist"]
@@ -107,6 +109,7 @@ func TestManifestsAreRefused(t *testing.T) {
 
 const meta = `name: store
 kind: meta
+for: test
 description: The store a step writes its results to
 logo: logo.svg
 implements: ["store >=1.0 <2"]
@@ -177,6 +180,7 @@ func TestListingFieldsAndMetaKeysAreRefused(t *testing.T) {
 func TestCommitAndVersionAreFilledIn(t *testing.T) {
 	m, err := Parse([]byte(`name: board
 kind: extension
+for: test
 build:
   image: ` + image + `
   run: [sh, -c, "echo {version} {commit} > {out}/dist/v"]
@@ -274,5 +278,30 @@ func TestARuntimeNamesWhatRunsTheProgram(t *testing.T) {
 		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
 			t.Errorf("%q: got %v, want %q", text, err, says)
 		}
+	}
+}
+
+func TestAManifestNamesTheSystemItIsFor(t *testing.T) {
+	m, err := Parse([]byte(good))
+	if err != nil || m.For != "test" {
+		t.Fatalf("%+v %v", m, err)
+	}
+
+	for _, bad := range []string{strings.Replace(good, "for: test\n", "", 1), strings.Replace(good, "for: test", "for: Pipelinegen", 1), strings.Replace(meta, "for: test\n", "", 1)} {
+		if _, err := Parse([]byte(bad)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), "the system the plugin is for") {
+			t.Errorf("got %v", err)
+		}
+	}
+
+	if err := m.CheckFor("test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.CheckFor(""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.CheckFor("piperun"); !errors.Is(err, ErrFor) || !strings.Contains(err.Error(), "plugin go-driver is for test, and this is piperun") {
+		t.Fatal(err)
 	}
 }

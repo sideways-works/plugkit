@@ -79,6 +79,9 @@ type Store struct {
 	Limits bundle.Limits
 	// OnBuild, when set, is called with the key of each build before it starts.
 	OnBuild func(key string)
+	// For is the system the host is: a plugin whose manifest is for another is refused before
+	// anything of it is built, unpacked or run. Empty takes a plugin for any system.
+	For string
 	// Untrusted is for a pin from someone the host doesn't trust: as repository.Options.Untrusted,
 	// only an https or ssh repository, nothing of the host's git config, credential helpers or ssh
 	// keys, and Credential as the only credential; GitEnv is left out.
@@ -162,6 +165,16 @@ func (s Store) zip(ctx context.Context, z Zip, osArch string) (Resolved, error) 
 	// the checksum is checked before the zip is opened at all
 	if got, err := pin.FileSHA256(file); err != nil || got != sum {
 		return Resolved{}, fmt.Errorf("%w: %s is %s, pinned %s", ErrChecksum, z.URL, got, sum)
+	}
+
+	// and the system it is for before anything of it is unpacked
+	m, err := bundle.ReadManifest(file, s.Limits)
+	if err != nil {
+		return Resolved{}, err
+	}
+
+	if err := m.CheckFor(s.For); err != nil {
+		return Resolved{}, fmt.Errorf("%w: %s: %w", ErrPin, z.URL, err)
 	}
 
 	if err := s.keep(entry, func(tmp string) error {
@@ -261,6 +274,10 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 	m, err := manifest.Parse(data)
 	if err != nil {
 		return Resolved{}, fmt.Errorf("%w: %s at %s: %s: %w", ErrPin, p.Repository, p.Commit, file, err)
+	}
+
+	if err := m.CheckFor(s.For); err != nil {
+		return Resolved{}, fmt.Errorf("%w: %s at %s: %w", ErrPin, p.Repository, p.Commit, err)
 	}
 
 	platform := osArch
@@ -372,6 +389,11 @@ func (s Store) found(entry, osArch string) (Resolved, error) {
 	m, err := manifest.Parse(data)
 	if err != nil {
 		return Resolved{}, fmt.Errorf("%w: %s: %w", ErrPin, entry, err)
+	}
+
+	// a cache the hosts of several systems share holds plugins of each
+	if err := m.CheckFor(s.For); err != nil {
+		return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
 	}
 
 	now := time.Now()

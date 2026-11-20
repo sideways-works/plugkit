@@ -26,6 +26,7 @@ import (
 	"github.com/sideways-works/plugkit/build"
 	"github.com/sideways-works/plugkit/bundle"
 	"github.com/sideways-works/plugkit/container"
+	"github.com/sideways-works/plugkit/manifest"
 )
 
 const (
@@ -88,6 +89,7 @@ func goRepo(t *testing.T) (string, string) {
 		"plugins/hello/LICENSE":           "license\n",
 		"plugins/hello/manifest.yaml": `name: hello
 kind: driver
+for: test
 program: hello
 build:
   image: ` + goImage + `
@@ -164,6 +166,7 @@ func TestACommitWithoutAManifestSaysSo(t *testing.T) {
 const zipManifest = `# packed by hand
 name: hello
 kind:  driver
+for: test
 program: hello
 build:
   image: busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
@@ -335,6 +338,7 @@ func TestAnAssetsOnlyPluginGoesThroughBuildZipAndCache(t *testing.T) {
 	root := t.TempDir()
 	m := `name: board
 kind: extension
+for: test
 build:
   image: ` + shImage + `
   run: [sh, -c, "mkdir -p {out}/web/dist && cp -R src/. {out}/web/dist/"]
@@ -429,6 +433,7 @@ func TestPluginsNamedGitAndSourcesKeepTheirDirectoriesBesideTheStore(t *testing.
 		"hello.sh": "#!/bin/sh\necho hello\n",
 		"manifest.yaml": `name: hello
 kind: driver
+for: test
 program: hello
 build:
   image: ` + shImage + `
@@ -490,6 +495,7 @@ platforms: [` + host + `]
 
 const metaManifest = `name: store
 kind: meta
+for: test
 logo: logo.svg
 schemas:
   put: {message: schemas/put.json, answer: schemas/put-answer.json}
@@ -560,6 +566,7 @@ func TestABuildIsStampedWithItsCommitAndVersion(t *testing.T) {
 		"main.go": "package main\n\nimport \"fmt\"\n\nvar version = \"dev\"\n\nfunc main() { fmt.Println(version) }\n",
 		"manifest.yaml": `name: hello
 kind: driver
+for: test
 program: hello
 build:
   image: ` + goImage + `
@@ -782,4 +789,47 @@ func random(t *testing.T, n int) string {
 	}
 
 	return hex.EncodeToString(b)
+}
+
+// A host never builds, unpacks or runs a plugin made for another system.
+func TestAPluginForAnotherSystemIsRefusedFirst(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": metaManifest, "logo.svg": "<svg/>", "schemas/put.json": "{}", "schemas/put-answer.json": "{}"})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "meta")
+
+	pin := Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}
+	cache := t.TempDir()
+
+	var builds atomic.Int32
+
+	s := Store{Dir: cache, For: "pipelinegen", OnBuild: func(string) { builds.Add(1) }}
+
+	if _, err := s.Resolve(context.Background(), pin, host); !errors.Is(err, manifest.ErrFor) || !strings.Contains(err.Error(), "is for test, and this is pipelinegen") || builds.Load() != 0 {
+		t.Fatalf("by commit: %v, %d builds", err, builds.Load())
+	}
+
+	// one cached for any system is refused on the next resolve as well
+	if _, err := (Store{Dir: cache}).Resolve(context.Background(), pin, host); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Resolve(context.Background(), pin, host); !errors.Is(err, manifest.ErrFor) {
+		t.Fatalf("from the cache: %v", err)
+	}
+
+	// a zip's manifest is read before anything of it is unpacked: this one's path up never is
+	other := zipOf(t, raw{"manifest.yaml", 0o644, zipManifest}, raw{"../x", 0o644, "x"})
+	srv, _ := serve(t, map[string][]byte{"/other.zip": other})
+	zipCache := t.TempDir()
+
+	_, err := Store{Dir: zipCache, For: "pipelinegen", Client: srv.Client()}.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/other.zip", SHA256: sum(other)}}, host)
+	if !errors.Is(err, manifest.ErrFor) || !strings.Contains(err.Error(), "plugin hello is for test, and this is pipelinegen") {
+		t.Fatalf("by zip: %v", err)
+	}
+
+	if ents, _ := os.ReadDir(zipCache); len(ents) > 0 { //nolint:errcheck // an empty cache reads as empty
+		t.Fatalf("the cache holds %v", ents)
+	}
 }

@@ -33,6 +33,9 @@ var ErrManifest = errors.New("manifest")
 type Manifest struct {
 	Name string `yaml:"name"`
 	Kind string `yaml:"kind"`
+	// For is the system the plugin is for, pipelinegen say: kinds of one system share names with
+	// another's, and a host never runs a plugin made for another.
+	For string `yaml:"for"`
 	// Program is the executable the build writes into {out}: <program>, or <program>.mjs for a
 	// Node plugin. It may be left out only with platforms [any], for a plugin of assets alone.
 	Program string `yaml:"program"`
@@ -147,6 +150,10 @@ func (m Manifest) check() []string {
 		add("kind %q: lower case letters, digits and dashes", m.Kind)
 	}
 
+	if !system.MatchString(m.For) {
+		add("for %q: the system the plugin is for, such as pipelinegen: a lower-case letter, then letters, digits and dashes", m.For)
+	}
+
 	m.checkListing(add)
 	m.checkPermissions(add)
 	m.checkRuntime(add)
@@ -250,7 +257,21 @@ func (m Manifest) checkRuntime(add func(string, ...any)) {
 	}
 }
 
-var permissionName = regexp.MustCompile(`^[a-z-]+:[a-z-]+$`)
+var (
+	permissionName = regexp.MustCompile(`^[a-z-]+:[a-z-]+$`)
+	system         = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+)
+
+var ErrFor = errors.New("a plugin for another system")
+
+// CheckFor refuses a plugin made for another system than host's; an empty host takes any.
+func (m Manifest) CheckFor(host string) error {
+	if host == "" || m.For == host {
+		return nil
+	}
+
+	return fmt.Errorf("%w: plugin %s is for %s, and this is %s", ErrFor, m.Name, m.For, host)
+}
 
 func (m Manifest) checkPermissions(add func(string, ...any)) {
 	seen := map[string]bool{}

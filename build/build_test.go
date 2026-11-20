@@ -41,6 +41,7 @@ func needTool(t *testing.T, image string) string {
 const goManifest = `# a tiny plugin
 name:    hello
 kind: driver
+for: test
 program: hello
 build:
   image: ` + GoImage + `
@@ -135,6 +136,7 @@ func TestABuildForAPlatformTheManifestLacksIsRefused(t *testing.T) {
 
 const assetsManifest = `name: board
 kind: extension
+for: test
 build:
   image: ` + ShImage + `
   run: [sh, -c, "mkdir -p {out}/dist && cp -R web/. {out}/dist/ && ls /sys/class/net > {out}/dist/net && env | sort > {out}/dist/env && if touch probe 2>/dev/null; then echo writable; else echo read-only; fi > {out}/dist/repo"]

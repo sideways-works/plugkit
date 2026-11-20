@@ -16,12 +16,13 @@ import (
 	"testing"
 
 	"github.com/sideways-works/plugkit/gitsafe"
+	"github.com/sideways-works/plugkit/manifest"
 )
 
 const image = "golang@sha256:564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1"
 
 func pluginManifest(name, kind, description string) string {
-	return "name: " + name + "\nkind: " + kind + "\nprogram: " + name + "\ndescription: " + description + "\nlogo: logo.svg\n" +
+	return "name: " + name + "\nkind: " + kind + "\nfor: test\nprogram: " + name + "\ndescription: " + description + "\nlogo: logo.svg\n" +
 		"build: {image: \"" + image + "\", run: [go, build, -o, \"{out}/" + name + "\", .]}\nplatforms: [linux/amd64]\n"
 }
 
@@ -526,6 +527,23 @@ func TestAllowLocalIsForTests(t *testing.T) {
 	}
 
 	if _, err := List(context.Background(), "ext::sh -c x", Options{Untrusted: true, AllowLocal: true}); !errors.Is(err, ErrRepository) {
+		t.Fatal(err)
+	}
+}
+
+func TestAtRefusesAPluginForAnotherSystem(t *testing.T) {
+	url, _ := monorepo(t)
+
+	got, err := List(context.Background(), url, Options{})
+	if err != nil || got[0].For != "test" {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	if _, _, err := At(context.Background(), url, "step/go-test", "0.1.0", Options{For: "test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := At(context.Background(), url, "step/go-test", "0.1.0", Options{For: "piperun"}); !errors.Is(err, manifest.ErrFor) || !strings.Contains(err.Error(), "is for test, and this is piperun") {
 		t.Fatal(err)
 	}
 }
