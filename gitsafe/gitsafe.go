@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -48,7 +49,15 @@ var scp = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+):(.+)$`)
 
 // CheckURL accepts https://host/..., ssh://host/... and user@host:path, and refuses an option, a
 // transport helper (ext::, any ::), file:// and a local path.
-func CheckURL(u string) error {
+func CheckURL(u string) error { return Check(u, false) }
+
+// Check is CheckURL, which with local also accepts file:// and a local path: for tests alone, as
+// a local path reads the host's own files.
+func Check(u string, local bool) error {
+	if local && (strings.HasPrefix(u, "file://") || strings.HasPrefix(u, "/") || strings.HasPrefix(u, "./") || strings.HasPrefix(u, "../")) && !strings.Contains(u, "::") {
+		return nil
+	}
+
 	switch {
 	case u == "" || strings.HasPrefix(u, "-"):
 		return fmt.Errorf("%w: %q starts with a dash or is empty", ErrURL, u)
@@ -137,6 +146,19 @@ func Env(base []string, home, remote string, cred Credential) []string {
 	}
 
 	return env
+}
+
+// AllowLocal lets env's git fetch from file:// and local paths too: for tests alone.
+func AllowLocal(env []string) []string {
+	out := slices.Clone(env)
+
+	for i, kv := range out {
+		if strings.HasPrefix(kv, "GIT_ALLOW_PROTOCOL=") {
+			out[i] = "GIT_ALLOW_PROTOCOL=https:ssh:file"
+		}
+	}
+
+	return out
 }
 
 // credentialHost is the host git may get cred for: the credential's own, or the remote's, and none
