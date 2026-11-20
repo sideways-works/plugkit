@@ -80,8 +80,9 @@ type Store struct {
 	// keys, and Credential as the only credential; GitEnv is left out.
 	Untrusted  bool
 	Credential gitsafe.Credential
-	// home is git's HOME with Untrusted: an empty directory of the store's own.
-	home string
+	// home is git's HOME with Untrusted, an empty directory of the store's own, and remote the
+	// repository it fetches from.
+	home, remote string
 }
 
 var (
@@ -223,7 +224,7 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		}
 		defer os.RemoveAll(home) //nolint:errcheck // an empty scratch home
 
-		s.home = home
+		s.home, s.remote = home, p.Repository
 	}
 
 	mirror, err := s.mirror(ctx, p.Repository, p.Commit)
@@ -505,7 +506,7 @@ func (s Store) command(ctx context.Context, dir string, args ...string) *exec.Cm
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // git, fetching the pinned repository
 
 	if s.Untrusted {
-		cmd.Env = gitsafe.Env(os.Environ(), s.home, s.Credential)
+		cmd.Env = gitsafe.Env(os.Environ(), s.home, s.remote, s.Credential)
 	} else {
 		cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), s.GitEnv...)
 	}

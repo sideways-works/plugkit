@@ -201,7 +201,7 @@ func open(ctx context.Context, url string, opt Options) (*git, context.Context, 
 		opt.MaxBytes = cmp.Or(opt.MaxBytes, defaultMaxBytes)
 	}
 
-	g, err := newGit(ctx, opt)
+	g, err := newGit(ctx, url, opt)
 	if err != nil {
 		cancel()
 
@@ -364,7 +364,7 @@ type git struct {
 	maxBytes  int64
 }
 
-func newGit(ctx context.Context, opt Options) (*git, error) {
+func newGit(ctx context.Context, url string, opt Options) (*git, error) {
 	dir, err := os.MkdirTemp("", "plugkit-repository-")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRepository, err)
@@ -380,7 +380,7 @@ func newGit(ctx context.Context, opt Options) (*git, error) {
 			return nil, fmt.Errorf("%w: %w", ErrRepository, err)
 		}
 
-		g.env = gitsafe.Env(os.Environ(), home, opt.Credential)
+		g.env = gitsafe.Env(os.Environ(), home, url, opt.Credential)
 	} else {
 		g.env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), opt.GitEnv...)
 	}

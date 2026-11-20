@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sideways-works/plugkit/gitsafe"
@@ -323,7 +324,19 @@ func TestAnUntrustedHTTPSRemoteTakesTheCallersCredential(t *testing.T) {
 		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Dir(url), "GIT_HTTP_EXPORT_ALL=1"},
 	}
 
+	var (
+		mu    sync.Mutex
+		seen  int
+		creds []string
+	)
+
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen++
+
+		creds = append(creds, r.Header.Get("Authorization"))
+		mu.Unlock()
+
 		if user, pass, ok := r.BasicAuth(); !ok || user != "x-access-token" || pass != "s3cret" {
 			w.Header().Set("WWW-Authenticate", `Basic realm="plugins"`)
 			http.Error(w, "who are you", http.StatusUnauthorized)
@@ -355,5 +368,56 @@ func TestAnUntrustedHTTPSRemoteTakesTheCallersCredential(t *testing.T) {
 	opt.MaxBytes = 1 << 10
 	if _, err := List(context.Background(), remote, opt); !errors.Is(err, ErrRepository) || !strings.Contains(err.Error(), "over the size limit") {
 		t.Fatal(err)
+	}
+
+	opt.MaxBytes = 0
+
+	leaked := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return slices.ContainsFunc(creds, func(c string) bool { return c != "" && c != "Basic eC1hY2Nlc3MtdG9rZW46czNjcmV0" })
+	}
+
+	// a credential for another host is never offered here
+	mu.Lock()
+	creds = nil
+	mu.Unlock()
+
+	other := opt
+	other.Credential.Host = "git.example.com"
+
+	if _, err := List(context.Background(), remote, other); err == nil {
+		t.Fatal("fetched with another host's credential")
+	}
+
+	mu.Lock()
+	gotToken := slices.Contains(creds, "Basic eC1hY2Nlc3MtdG9rZW46czNjcmV0")
+	mu.Unlock()
+
+	if gotToken || leaked() {
+		t.Fatalf("this host got another host's token: %q", creds)
+	}
+
+	// a redirect elsewhere is never followed, so the second server neither serves nor sees the token
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, srv.URL+r.URL.RequestURI(), http.StatusFound) //nolint:gosec // the test's own servers
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	mu.Lock()
+	before := seen
+	mu.Unlock()
+
+	if _, err := List(context.Background(), elsewhere.URL+"/plugins.git", opt); err == nil {
+		t.Fatal("a redirect was followed")
+	}
+
+	mu.Lock()
+	after := seen
+	mu.Unlock()
+
+	if after != before {
+		t.Fatalf("the redirect reached the second server %d times", after-before)
 	}
 }

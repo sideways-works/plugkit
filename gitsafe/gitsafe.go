@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -49,24 +50,29 @@ func CheckURL(u string) error {
 	return nil
 }
 
-// Credential is the https credential the caller gives: a token, and the user name its host wants
-// with it (x-access-token when empty).
+// Credential is the https credential the caller gives: a token, the user name its host wants with
+// it (x-access-token when empty), and the host it is for, host[:port] (the remote's when empty).
+// git gets it for that host over https alone, so a remote elsewhere, or a redirect, never sees it.
 type Credential struct {
-	Username, Token string
+	Host, Username, Token string
 }
 
 const (
+	envHost  = "PLUGKIT_GIT_HOST"
 	envUser  = "PLUGKIT_GIT_USERNAME"
 	envToken = "PLUGKIT_GIT_TOKEN" //nolint:gosec // the variable's name, not a credential
 	// helper answers git's request for a credential from the environment, so the token is in
-	// neither the URL nor any process's arguments.
-	helper = `!f() { test "$1" = get && printf 'username=%s\npassword=%s\n' "$` + envUser + `" "$` + envToken + `"; }; f`
+	// neither the URL nor any process's arguments, and only when git asks for https on the host the
+	// credential is for: git writes protocol= and host= lines, host with its port when it has one.
+	helper = `!f() { test "$1" = get || return 0; p=; h=; while IFS= read -r l; do case "$l" in protocol=*) p="${l#protocol=}";; host=*) h="${l#host=}";; "") break;; esac; done; ` +
+		`test "$p" = https && test -n "$h" && test "$h" = "$` + envHost + `" && printf 'username=%s\npassword=%s\n' "$` + envUser + `" "$` + envToken + `"; }; f`
 )
 
-// Env is git's whole environment for an untrusted remote: base without its git and ssh variables,
-// home as HOME, only https and ssh allowed, no system or global config, no prompt, ssh with nothing
-// of the host's, and cred, when it has a token, as the only credential.
-func Env(base []string, home string, cred Credential) []string {
+// Env is git's whole environment for remote, an untrusted URL CheckURL accepted: base without its
+// git and ssh variables, home as HOME, only https and ssh allowed, no system or global config, no
+// prompt, no redirect followed, ssh with nothing of the host's, and cred, when it has a token, as
+// the only credential, for its host alone.
+func Env(base []string, home, remote string, cred Credential) []string {
 	env := make([]string, 0, len(base)+12)
 
 	for _, kv := range base {
@@ -85,15 +91,38 @@ func Env(base []string, home string, cred Credential) []string {
 		"GIT_SSH_COMMAND="+SSHCommand,
 	)
 
-	if cred.Token != "" {
+	// a redirect could take the fetch, and a credential, to another host
+	config := [][2]string{{"http.followRedirects", "false"}}
+
+	if host := credentialHost(remote, cred); cred.Token != "" && host != "" {
 		user := cred.Username
 		if user == "" {
 			user = "x-access-token"
 		}
 
-		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0="+helper,
-			envUser+"="+user, envToken+"="+cred.Token)
+		config = append(config, [2]string{"credential.helper", helper})
+		env = append(env, envHost+"="+host, envUser+"="+user, envToken+"="+cred.Token)
+	}
+
+	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(config)))
+	for i, kv := range config {
+		env = append(env, "GIT_CONFIG_KEY_"+strconv.Itoa(i)+"="+kv[0], "GIT_CONFIG_VALUE_"+strconv.Itoa(i)+"="+kv[1])
 	}
 
 	return env
+}
+
+// credentialHost is the host git may get cred for: the credential's own, or the remote's, and none
+// for a remote that isn't https, whose credential is ssh's.
+func credentialHost(remote string, cred Credential) string {
+	u, err := url.Parse(remote)
+	if err != nil || u.Scheme != "https" {
+		return ""
+	}
+
+	if cred.Host != "" {
+		return strings.ToLower(cred.Host)
+	}
+
+	return strings.ToLower(u.Host)
 }
