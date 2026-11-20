@@ -19,7 +19,7 @@ func TestOnlyHTTPSAndSSHRemotesAreAccepted(t *testing.T) {
 	for _, u := range []string{
 		"", "-uhack", "--upload-pack=touch /x", "ext::sh -c touch% /x", "fd::3", "https://host/o/r::x",
 		"file:///etc/passwd", "/srv/repo.git", "./repo", "repo", "../repo", "http://host/o/r", "git://host/o/r",
-		"ssh://-oProxyCommand=touch%20x/r", "git@-oProxyCommand=x:r", "git@host:-r", "https://", "https://host/o r", `C:\repo`,
+		"ssh://-oProxyCommand=touch%20x/r", "git@-oProxyCommand=x:r", "ssh://-oProxyCommand=x@host/r", "ssh://-u:x@host/r", "-oProxyCommand=x@host:r", "git@host:-r", "https://", "https://host/o r", `C:\repo`,
 	} {
 		if err := CheckURL(u); !errors.Is(err, ErrURL) {
 			t.Errorf("%q accepted: %v", u, err)

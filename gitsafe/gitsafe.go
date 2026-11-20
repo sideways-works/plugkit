@@ -19,7 +19,7 @@ var ErrURL = errors.New("not a remote git may fetch from")
 const SSHCommand = "ssh -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes -F /dev/null"
 
 // scp is git's scp-like form, [user@]host:path, whose host has no slash before the colon.
-var scp = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+@)?([A-Za-z0-9.-]+):(.+)$`)
+var scp = regexp.MustCompile(`^(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9.-]+):(.+)$`)
 
 // CheckURL accepts https://host/..., ssh://host/... and user@host:path, and refuses an option, a
 // transport helper (ext::, any ::), file:// and a local path.
@@ -35,7 +35,9 @@ func CheckURL(u string) error {
 
 	if strings.Contains(u, "://") {
 		p, err := url.Parse(u)
-		if err != nil || (p.Scheme != "https" && p.Scheme != "ssh") || p.Hostname() == "" || strings.HasPrefix(p.Host, "-") || strings.HasPrefix(p.Hostname(), "-") {
+		// ssh takes a user name or host starting with a dash for an option
+		if err != nil || (p.Scheme != "https" && p.Scheme != "ssh") || p.Hostname() == "" || strings.HasPrefix(p.Host, "-") || strings.HasPrefix(p.Hostname(), "-") ||
+			p.User != nil && strings.HasPrefix(p.User.Username(), "-") {
 			return fmt.Errorf("%w: %q: only https:// and ssh:// URLs, or user@host:path", ErrURL, u)
 		}
 
@@ -43,7 +45,7 @@ func CheckURL(u string) error {
 	}
 
 	m := scp.FindStringSubmatch(u)
-	if m == nil || strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[2], "-") {
+	if m == nil || strings.HasPrefix(m[1], "-") || strings.HasPrefix(m[2], "-") || strings.HasPrefix(m[3], "-") {
 		return fmt.Errorf("%w: %q: only https:// and ssh:// URLs, or user@host:path", ErrURL, u)
 	}
 
