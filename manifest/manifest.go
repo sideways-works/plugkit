@@ -84,10 +84,45 @@ const KindMeta = "meta"
 
 type Build struct {
 	// Image is pinned by digest: name[:tag]@sha256:<64 hex>.
-	Image   string            `yaml:"image"`
-	Run     []string          `yaml:"run"`
-	Env     map[string]string `yaml:"env"`
-	Network bool              `yaml:"network"`
+	Image string            `yaml:"image"`
+	Run   Commands          `yaml:"run"`
+	Env   map[string]string `yaml:"env"`
+	// Network gives the build a network; Copy runs it in a writable copy of the repository, for a
+	// build that writes beside its sources (npm ci).
+	Network bool `yaml:"network"`
+	Copy    bool `yaml:"copy"`
+}
+
+// Commands are a build's commands, each an argv run with no shell, in order, the first that fails
+// failing the build: one argv in the manifest, or a list of them.
+type Commands [][]string
+
+var errCommands = errors.New("build.run: an argv, such as [go, build, ./cmd/x], or a list of them")
+
+func (c *Commands) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.SequenceNode {
+		return errCommands
+	}
+
+	if len(n.Content) > 0 && n.Content[0].Kind == yaml.ScalarNode {
+		var argv []string
+		if err := n.Decode(&argv); err != nil {
+			return fmt.Errorf("%w: %w", errCommands, err)
+		}
+
+		*c = Commands{argv}
+
+		return nil
+	}
+
+	var all [][]string
+	if err := n.Decode(&all); err != nil {
+		return fmt.Errorf("%w: %w", errCommands, err)
+	}
+
+	*c = all
+
+	return nil
 }
 
 var (
@@ -279,7 +314,7 @@ func (m Manifest) checkMeta(add func(string, ...any)) {
 	b := m.Build
 
 	switch {
-	case m.Program != "" || b.Image != "" || len(b.Run) > 0 || len(b.Env) > 0 || b.Network:
+	case m.Program != "" || b.Image != "" || len(b.Run) > 0 || len(b.Env) > 0 || b.Network || b.Copy:
 		add("a plugin of kind %s has no build and no program", KindMeta)
 	case len(m.Platforms) > 0 && !slices.Equal(m.Platforms, []string{Any}):
 		add("a plugin of kind %s is the same on every platform: platforms [any], or none", KindMeta)
@@ -329,8 +364,8 @@ func (b Build) check(anyPlatform bool, add func(string, ...any)) {
 		add("build.image %q: an image pinned by digest, name@sha256:<64 hex>", b.Image)
 	}
 
-	if len(b.Run) == 0 {
-		add("build.run is missing: the command, as a list")
+	if len(b.Run) == 0 || slices.ContainsFunc(b.Run, func(argv []string) bool { return len(argv) == 0 }) {
+		add("build.run is missing a command: an argv, as a list, or a list of them")
 	}
 
 	for k := range b.Env {
@@ -339,7 +374,7 @@ func (b Build) check(anyPlatform bool, add func(string, ...any)) {
 		}
 	}
 
-	all := slices.Clone(b.Run)
+	all := slices.Concat(b.Run...)
 	for _, v := range b.Env {
 		all = append(all, v)
 	}
@@ -447,7 +482,7 @@ func Expand(s, out, osArch string) string { return Values{Out: out, Platform: os
 
 // Values are what a build's placeholders stand for: {out}; {os} and {arch} of Platform (os/arch);
 // {commit}, the full commit being built; and {version}, the version of the tag the build came
-// through, without a leading v, empty when it came through none.
+// through, without a leading v (see StampVersion when it came through none).
 type Values struct {
 	Out, Platform, Commit, Version string
 }
@@ -455,7 +490,21 @@ type Values struct {
 func (v Values) Expand(s string) string {
 	goos, arch, _ := strings.Cut(v.Platform, "/")
 
-	return strings.NewReplacer("{out}", v.Out, "{os}", goos, "{arch}", arch, "{commit}", v.Commit, "{version}", v.Version).Replace(s)
+	return strings.NewReplacer("{out}", v.Out, "{os}", goos, "{arch}", arch, "{commit}", v.Commit, "{version}", StampVersion(v.Version, v.Commit)).Replace(s)
+}
+
+// StampVersion is the version a build is stamped with: version without a leading v, or with none
+// 0.0.0-dev and the commit's first 12 characters as build metadata, a version Go and npm both take.
+func StampVersion(version, commit string) string {
+	if v := strings.TrimPrefix(version, "v"); v != "" {
+		return v
+	}
+
+	if len(commit) >= 12 {
+		return "0.0.0-dev+" + commit[:12]
+	}
+
+	return "0.0.0-dev"
 }
 
 // Digest is the SHA-256 of a manifest's bytes in hex.

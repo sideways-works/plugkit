@@ -187,7 +187,7 @@ assets: [dist]
 		t.Fatal(err)
 	}
 
-	got := Values{Out: "/out", Commit: "abc", Version: "1.2.3"}.Expand(m.Build.Run[2])
+	got := Values{Out: "/out", Commit: "abc", Version: "1.2.3"}.Expand(m.Build.Run[0][2])
 	if got != "echo 1.2.3 abc > /out/dist/v" {
 		t.Fatalf("expanded %q", got)
 	}
@@ -274,5 +274,47 @@ func TestARuntimeNamesWhatRunsTheProgram(t *testing.T) {
 		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
 			t.Errorf("%q: got %v, want %q", text, err, says)
 		}
+	}
+}
+
+func TestABuildRunsOneArgvOrSeveral(t *testing.T) {
+	m, err := Parse([]byte(good))
+	if err != nil || len(m.Build.Run) != 1 || m.Build.Run[0][0] != "go" {
+		t.Fatalf("one argv: %+v %v", m.Build.Run, err)
+	}
+
+	several := strings.Replace(good, `  run: [go, build, -trimpath, -o, "{out}/go-driver", ./cmd/go-driver]`,
+		"  copy: true\n  run:\n    - [npm, ci]\n    - [npm, pkg, set, \"version={version}\"]\n    - [cp, dist/x.mjs, \"{out}/\"]", 1)
+
+	m, err = Parse([]byte(several))
+	if err != nil || len(m.Build.Run) != 3 || !m.Build.Copy || m.Build.Run[1][3] != "version={version}" {
+		t.Fatalf("several: %+v %v", m.Build, err)
+	}
+
+	for bad, says := range map[string]string{
+		strings.Replace(several, "    - [npm, ci]\n", "    - []\n", 1):     "build.run is missing a command",
+		strings.Replace(several, "    - [npm, ci]\n", "    - npm ci\n", 1): "build.run: an argv",
+		meta + "build: {copy: true}\n":                                     "has no build and no program",
+	} {
+		if _, err := Parse([]byte(bad)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
+			t.Errorf("got %v, want %q", err, says)
+		}
+	}
+}
+
+func TestAnUntaggedBuildIsStampedAsADevVersion(t *testing.T) {
+	for _, c := range []struct{ version, commit, want string }{
+		{"1.2.3", "0123456789abcdef0123456789abcdef01234567", "1.2.3"},
+		{"v1.2.3", "", "1.2.3"},
+		{"", "0123456789abcdef0123456789abcdef01234567", "0.0.0-dev+0123456789ab"},
+		{"", "", "0.0.0-dev"},
+	} {
+		if got := StampVersion(c.version, c.commit); got != c.want {
+			t.Errorf("%q %q: %q, want %q", c.version, c.commit, got, c.want)
+		}
+	}
+
+	if got := (Values{Commit: "0123456789abcdef0123456789abcdef01234567"}).Expand("v{version}"); got != "v0.0.0-dev+0123456789ab" {
+		t.Fatalf("expanded %q", got)
 	}
 }
