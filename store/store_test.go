@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -474,7 +477,7 @@ platforms: [` + host + `]
 		left = append(left, e.Name())
 	}
 
-	if !slices.Equal(left, []string{".git-clones", ".sources", "git", "sources"}) {
+	if !slices.Equal(left, []string{".sources", "git", "sources"}) {
 		t.Fatalf("after the trim the cache holds %v", left)
 	}
 
@@ -621,4 +624,162 @@ func TestAnUntrustedStoreFetchesFromNoLocalPath(t *testing.T) {
 			t.Errorf("%s: %v", repo, err)
 		}
 	}
+}
+
+// A resolve writes nothing another resolve shares but the entry, by a rename the first one wins:
+// many at once, in goroutines and in processes, all get the one entry and leave no scratch behind.
+func TestManyResolvesAtOnceShareOneEntry(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"manifest.yaml":           metaManifest,
+		"logo.svg":                "<svg/>",
+		"schemas/put.json":        "{}",
+		"schemas/put-answer.json": "{}",
+	})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "meta")
+
+	cache := t.TempDir()
+	commit := git(t, root, "rev-parse", "HEAD")
+
+	const n = 6
+
+	var wg sync.WaitGroup
+
+	errs := make(chan error, 2*n)
+
+	for range n {
+		wg.Go(func() {
+			_, err := Store{Dir: cache}.Resolve(context.Background(), Pin{Repository: root, Commit: commit}, host)
+			errs <- err
+		})
+
+		wg.Go(func() {
+			cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^$") //nolint:gosec // the test binary itself
+
+			cmd.Env = append(os.Environ(), envResolve+"="+cache+"\n"+root+"\n"+commit)
+
+			if out, err := cmd.CombinedOutput(); err != nil {
+				errs <- fmt.Errorf("a process: %w: %s", err, out)
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
+	ents, err := os.ReadDir(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var entries, other []string
+
+	for _, e := range ents {
+		switch {
+		case sha256Hex.MatchString(e.Name()):
+			entries = append(entries, e.Name())
+		case e.Name() != aliasesDir:
+			other = append(other, e.Name())
+		}
+	}
+
+	if len(entries) != 1 || len(other) > 0 {
+		t.Fatalf("the cache holds the entries %v and %v", entries, other)
+	}
+
+	aliases, _ := os.ReadDir(filepath.Join(cache, aliasesDir)) //nolint:errcheck // compared below
+	if len(aliases) != 1 {
+		t.Fatalf("aliases %v", aliases)
+	}
+}
+
+// envResolve makes the test binary a process that resolves one pin, for the test of many at once.
+const envResolve = "PLUGKIT_TEST_RESOLVE"
+
+func TestMain(m *testing.M) {
+	if v := os.Getenv(envResolve); v != "" {
+		f := strings.Split(v, "\n")
+
+		if _, err := (Store{Dir: f[0]}).Resolve(context.Background(), Pin{Repository: f[1], Commit: f[2]}, host); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+		os.Exit(0)
+	}
+
+	os.Exit(m.Run())
+}
+
+// A server that serves no commit by its id gets the pin's ref fetched, one deep, and never every
+// branch and tag.
+func TestTheFallbackFetchesThePinsRefAlone(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": metaManifest, "logo.svg": "<svg/>", "schemas/put.json": "{}", "schemas/put-answer.json": "{}"})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "meta")
+
+	older := git(t, root, "rev-parse", "HEAD")
+	write(t, root, map[string]string{"README": "x"})
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "more")
+
+	// protocol v0 serves only what it advertises, and the older commit is no ref's tip
+	v0 := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.version", "GIT_CONFIG_VALUE_0=0"}
+	s := Store{Dir: t.TempDir(), GitEnv: v0}
+
+	if _, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: older}, host); !errors.Is(err, ErrPin) {
+		t.Fatalf("a commit no ref is at, without a ref: %v", err)
+	}
+
+	if _, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: older, Ref: "refs/heads/master"}, host); err == nil || !strings.Contains(err.Error(), "has no commit "+older+" at refs/heads/master") {
+		t.Fatalf("a ref whose tip is another commit: %v", err)
+	}
+
+	git(t, root, "tag", "v1", older)
+
+	if r, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: older, Ref: "refs/tags/v1"}, host); err != nil || r.Manifest.Kind != "meta" {
+		t.Fatalf("by its tag: %+v %v", r, err)
+	}
+}
+
+func TestAnUntrustedFetchIsCapped(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": metaManifest, "logo.svg": "<svg/>", "schemas/put.json": "{}", "schemas/put-answer.json": "{}", "big": random(t, 1<<20)})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "meta")
+
+	s := Store{Dir: t.TempDir(), Untrusted: true, AllowLocal: true, MaxBytes: 64 << 10}
+
+	_, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host)
+	if !errors.Is(err, ErrPin) || !strings.Contains(err.Error(), "over the size limit") {
+		t.Fatal(err)
+	}
+
+	s.MaxBytes = 0
+	if _, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host); err != nil {
+		t.Fatalf("within the default cap: %v", err)
+	}
+}
+
+// random is n bytes that don't compress, as text.
+func random(t *testing.T, n int) string {
+	t.Helper()
+
+	b := make([]byte, n/2)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+
+	return hex.EncodeToString(b)
 }

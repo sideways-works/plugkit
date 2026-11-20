@@ -9,6 +9,7 @@ package store
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -49,7 +50,10 @@ type Pin struct {
 	// Version is the version of the tag the commit was found through (repository.At), without a
 	// leading v: a build's {version}. Empty when the pin names the commit alone.
 	Version string
-	Zip     *Zip
+	// Ref is a ref of the repository that holds the commit, its tag say, fetched when the server
+	// serves no commit by its id; the store never fetches every branch and tag.
+	Ref string
+	Zip *Zip
 }
 
 type Zip struct {
@@ -83,6 +87,11 @@ type Store struct {
 	// KnownHosts are as repository.Options.KnownHosts: an untrusted ssh repository's host key must be
 	// in them.
 	KnownHosts string
+	// Timeout bounds an untrusted pin's fetch, MaxBytes what it writes; 0 is 2 minutes and 256 MiB.
+	Timeout  time.Duration
+	MaxBytes int64
+	// AllowLocal lets an untrusted pin's repository be file:// or a local path: for tests alone.
+	AllowLocal bool
 	// home is git's HOME with Untrusted, an empty directory of the store's own, and remote the
 	// repository it fetches from.
 	home, remote string
@@ -98,6 +107,12 @@ var (
 const (
 	mirrorsDir = ".git-clones"
 	aliasesDir = ".sources"
+)
+
+// The bounds of an untrusted pin's fetch, unless the store sets its own.
+const (
+	defaultFetchTimeout = 2 * time.Minute
+	defaultFetchBytes   = 256 << 20
 )
 
 // maxZip bounds a download, so a wrong URL can't fill the disk.
@@ -216,28 +231,25 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		}
 	}
 
+	if err := os.MkdirAll(s.Dir, 0o750); err != nil {
+		return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
+	}
+
 	if s.Untrusted {
-		if err := gitsafe.CheckURL(p.Repository); err != nil {
-			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
-		}
-
-		home, err := os.MkdirTemp(s.Dir, ".home-")
+		home, done, err := s.untrusted(p.Repository)
 		if err != nil {
-			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
+			return Resolved{}, err
 		}
-		defer os.RemoveAll(home) //nolint:errcheck // an empty scratch home
-
-		if err := gitsafe.Prepare(home, s.KnownHosts); err != nil {
-			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
-		}
+		defer done()
 
 		s.home, s.remote = home, p.Repository
 	}
 
-	mirror, err := s.mirror(ctx, p.Repository, p.Commit)
+	mirror, err := s.fetchCommit(ctx, p)
 	if err != nil {
 		return Resolved{}, err
 	}
+	defer os.RemoveAll(mirror) //nolint:errcheck // the resolve's own repository
 
 	file := path.Join(p.Path, manifest.FileName)
 
@@ -385,39 +397,68 @@ func (s Store) found(entry, osArch string) (Resolved, error) {
 	return Resolved{}, fmt.Errorf("%w: plugin %s holds neither %s nor %s", ErrPin, m.Name, m.Binary(osArch), m.Script())
 }
 
-// mirror is the cache's bare repository of repository holding commit, fetched only when it doesn't.
-func (s Store) mirror(ctx context.Context, repository, commit string) (string, error) {
-	dir := filepath.Join(s.Dir, mirrorsDir, hexSum(repository)[:24])
-
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
-		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
-			return "", fmt.Errorf("%w: %w", ErrPin, err)
-		}
-
-		if _, err := s.git(ctx, "", "init", "-q", "--bare", dir); err != nil {
-			return "", err
-		}
+// untrusted checks an untrusted pin's repository and makes git an empty home of the resolve's own,
+// with the caller's known hosts; done removes it.
+func (s Store) untrusted(repository string) (string, func(), error) {
+	if err := gitsafe.Check(repository, s.AllowLocal); err != nil {
+		return "", nil, fmt.Errorf("%w: %w", ErrPin, err)
 	}
 
-	now := time.Now()
-	_ = os.Chtimes(dir, now, now) //nolint:errcheck // at worst it is fetched again
-
-	if _, err := s.git(ctx, dir, "cat-file", "-e", commit+"^{commit}"); err == nil {
-		return dir, nil
-	}
-
-	_, err := s.git(ctx, dir, "fetch", "-q", "--depth", "1", "--", repository, commit)
+	home, err := os.MkdirTemp(s.Dir, ".home-")
 	if err != nil {
-		// a server that serves no commit by its id still serves its branches and tags
-		_, err = s.git(ctx, dir, "fetch", "-q", "--", repository, "+refs/heads/*:refs/remotes/src/*", "+refs/tags/*:refs/tags/*")
+		return "", nil, fmt.Errorf("%w: %w", ErrPin, err)
 	}
 
+	done := func() { _ = os.RemoveAll(home) } //nolint:errcheck // an empty scratch home
+
+	if err := gitsafe.Prepare(home, s.KnownHosts); err != nil {
+		done()
+
+		return "", nil, fmt.Errorf("%w: %w", ErrPin, err)
+	}
+
+	return home, done, nil
+}
+
+// fetchCommit fetches commit, one deep, into a repository of its own under the store's directory,
+// which the caller removes. No git repository is shared, so two resolves at once write nothing in
+// common: a shallow fetch costs little beside the build it feeds, and the build is what is kept.
+func (s Store) fetchCommit(ctx context.Context, p Pin) (string, error) {
+	if s.Untrusted {
+		var cancel context.CancelFunc
+
+		ctx, cancel = context.WithTimeout(ctx, cmp.Or(s.Timeout, defaultFetchTimeout))
+		defer cancel()
+	}
+
+	dir, err := os.MkdirTemp(s.Dir, ".git-")
 	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrPin, err)
+	}
+
+	if _, err := s.git(ctx, "", "init", "-q", "--bare", dir); err != nil {
+		_ = os.RemoveAll(dir) //nolint:errcheck // the error says it
+
 		return "", err
 	}
 
-	if _, err := s.git(ctx, dir, "cat-file", "-e", commit+"^{commit}"); err != nil {
-		return "", fmt.Errorf("%w: %s has no commit %s", ErrPin, repository, commit)
+	_, err = s.git(ctx, dir, "fetch", "-q", "--depth", "1", "--", p.Repository, p.Commit)
+	if err != nil && p.Ref != "" {
+		// a server that serves no commit by its id still serves the ref the pin names beside it
+		_, err = s.git(ctx, dir, "fetch", "-q", "--depth", "1", "--", p.Repository, p.Ref)
+	}
+
+	if err == nil {
+		_, err = s.git(ctx, dir, "cat-file", "-e", p.Commit+"^{commit}")
+		if err != nil {
+			err = fmt.Errorf("%w: %s has no commit %s%s", ErrPin, p.Repository, p.Commit, map[bool]string{true: " at " + p.Ref, false: ""}[p.Ref != ""])
+		}
+	}
+
+	if err != nil {
+		_ = os.RemoveAll(dir) //nolint:errcheck // the error says it
+
+		return "", err
 	}
 
 	return dir, nil
@@ -514,6 +555,9 @@ func (s Store) command(ctx context.Context, dir string, args ...string) *exec.Cm
 
 	if s.Untrusted {
 		cmd.Env = gitsafe.Env(os.Environ(), s.home, s.remote, s.Credential)
+		if s.AllowLocal {
+			cmd.Env = gitsafe.AllowLocal(cmd.Env)
+		}
 	} else {
 		cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), s.GitEnv...)
 	}
@@ -521,16 +565,17 @@ func (s Store) command(ctx context.Context, dir string, args ...string) *exec.Cm
 	return cmd
 }
 
+// git runs git in the repository dir (none for init); untrusted, it stops git once dir holds more
+// than MaxBytes.
 func (s Store) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	cmd := s.command(ctx, dir, args...)
+	limit := int64(0)
+	if s.Untrusted && dir != "" {
+		limit = cmp.Or(s.MaxBytes, defaultFetchBytes)
+	}
 
-	var errOut bytes.Buffer
-
-	cmd.Stderr = &errOut
-
-	out, err := cmd.Output()
+	out, err := gitsafe.Run(ctx, func(ctx context.Context) *exec.Cmd { return s.command(ctx, dir, args...) }, dir, limit)
 	if err != nil {
-		return nil, fmt.Errorf("%w: git %s: %w: %s", ErrPin, strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
+		return nil, fmt.Errorf("%w: git %s: %w", ErrPin, strings.Join(args, " "), err)
 	}
 
 	return out, nil
