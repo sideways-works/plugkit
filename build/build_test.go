@@ -200,3 +200,54 @@ func TestAFailingBuildSaysWhatItPrinted(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Several commands run in order, no shell around them, each in a container of its own; with
+// build.copy they write in a copy of the repository, never the repository itself.
+func TestCommandsRunInOrderInACopyTheyWrite(t *testing.T) {
+	tool := needTool(t, ShImage)
+	root := t.TempDir()
+	m := `name: board
+kind: extension
+build:
+  image: ` + ShImage + `
+  copy: true
+  run:
+    - [mkdir, -p, made]
+    - [touch, made/in-the-copy]
+    - [cp, -R, made, "{out}/dist"]
+platforms: [any]
+assets: [dist]
+`
+	write(t, root, map[string]string{"manifest.yaml": m, "web/board.js": "x"})
+
+	out := filepath.Join(t.TempDir(), "board")
+	if _, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(out, "dist", "in-the-copy")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "made")); err == nil {
+		t.Fatal("the build wrote in the repository")
+	}
+
+	// the first command that fails ends the build
+	failing := strings.Replace(m, "    - [mkdir, -p, made]\n", "    - [false]\n", 1)
+	write(t, root, map[string]string{"manifest.yaml": failing})
+
+	_, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(failing), Out: filepath.Join(t.TempDir(), "board")})
+	if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), ": false: ") {
+		t.Fatalf("a failing command: %v", err)
+	}
+
+	if err := os.Symlink("/etc/passwd", filepath.Join(root, "web", "passwd")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: filepath.Join(t.TempDir(), "board")})
+	if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), "web/passwd is a symlink") {
+		t.Fatalf("a symlink in the repository: %v", err)
+	}
+}

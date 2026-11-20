@@ -84,6 +84,20 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		return m, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
+	if m.Build.Copy && m.Kind != manifest.KindMeta {
+		dir, err := os.MkdirTemp(filepath.Dir(o.Out), ".src-")
+		if err != nil {
+			return m, fmt.Errorf("%w: %w", ErrBuild, err)
+		}
+		defer os.RemoveAll(dir) //nolint:errcheck // the build's own copy
+
+		if err := copyTree(o.Root, dir); err != nil {
+			return m, err
+		}
+
+		b.src = dir
+	}
+
 	for i, p := range platforms {
 		if m.Kind == manifest.KindMeta {
 			break
@@ -143,6 +157,8 @@ type builder struct {
 	o    Options
 	m    manifest.Manifest
 	tool string
+	// src is the writable copy of the repository the build runs in with build.copy, else empty.
+	src string
 }
 
 // platform builds for one platform, keeping the assets of the first build; it says whether the
@@ -180,8 +196,6 @@ func (b builder) run(ctx context.Context, osArch, scratch string) error {
 		values.Platform = ""
 	}
 
-	expand := values.Expand
-
 	env := map[string]string{"HOME": "/tmp", "GOFLAGS": "-trimpath"}
 
 	for k, v := range b.m.Build.Env {
@@ -189,12 +203,7 @@ func (b builder) run(ctx context.Context, osArch, scratch string) error {
 			v = "-trimpath " + v
 		}
 
-		env[k] = expand(v)
-	}
-
-	cmd := make([]string, 0, len(b.m.Build.Run))
-	for _, a := range b.m.Build.Run {
-		cmd = append(cmd, expand(a))
+		env[k] = values.Expand(v)
 	}
 
 	network := "none"
@@ -204,13 +213,36 @@ func (b builder) run(ctx context.Context, osArch, scratch string) error {
 
 	user, userns, _ := container.Owner(ctx, b.tool, true)
 
-	r := container.Run{
-		Tool: b.tool, Image: b.m.Build.Image, Name: container.Name("plugin-build-" + b.m.Name),
-		Dir:    path.Join(srcAt, b.o.Dir),
-		Mounts: []container.Mount{{Host: b.o.Root, At: srcAt, ReadOnly: true}, {Host: scratch, At: outAt}},
-		Env:    env, Network: network, User: user, UserNS: userns, Cmd: cmd,
+	// the copy is the build's own to write in; the repository itself is never written
+	src := container.Mount{Host: b.o.Root, At: srcAt, ReadOnly: true}
+	if b.src != "" {
+		src = container.Mount{Host: b.src, At: srcAt}
 	}
 
+	// each command runs in a container of its own, no shell around it, and the first that fails
+	// ends the build: what one leaves for the next is in the repository's copy and in {out}
+	for _, argv := range b.m.Build.Run {
+		cmd := make([]string, 0, len(argv))
+		for _, a := range argv {
+			cmd = append(cmd, values.Expand(a))
+		}
+
+		r := container.Run{
+			Tool: b.tool, Image: b.m.Build.Image, Name: container.Name("plugin-build-" + b.m.Name),
+			Dir:    path.Join(srcAt, b.o.Dir),
+			Mounts: []container.Mount{src, {Host: scratch, At: outAt}},
+			Env:    env, Network: network, User: user, UserNS: userns, Cmd: cmd,
+		}
+
+		if err := b.runOne(ctx, r, osArch); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (b builder) runOne(ctx context.Context, r container.Run, osArch string) error {
 	c, err := r.Command(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBuild, err)
@@ -227,7 +259,7 @@ func (b builder) run(ctx context.Context, osArch, scratch string) error {
 			out = "..." + out[len(out)-4000:]
 		}
 
-		return fmt.Errorf("%w: plugin %s for %s: %s: %w\n%s", ErrBuild, b.m.Name, osArch, strings.Join(b.m.Build.Run, " "), err, out)
+		return fmt.Errorf("%w: plugin %s for %s: %s: %w\n%s", ErrBuild, b.m.Name, osArch, strings.Join(r.Cmd, " "), err, out)
 	}
 
 	return nil
@@ -389,6 +421,68 @@ func copyFile(from, to string) error {
 	defer in.Close() //nolint:errcheck // read only
 
 	out, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644) //nolint:gosec // a plugin's files are readable
+	if err != nil {
+		return err //nolint:wrapcheck // the caller says whose
+	}
+
+	_, err = io.Copy(out, in)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+
+	return err
+}
+
+var errSymlink = errors.New("is a symlink, which the copy a build writes in doesn't take")
+
+// copyTree copies the repository at from into to for a build to write in: its files and modes,
+// .git left out, and a symlink refused, which could name a file outside the repository.
+func copyTree(from, to string) error {
+	err := filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(from, p)
+		if err != nil || rel == "." {
+			return err //nolint:wrapcheck // said below
+		}
+
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err //nolint:wrapcheck // said below
+		}
+
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("%s %w", filepath.ToSlash(rel), errSymlink)
+		case d.IsDir():
+			return os.Mkdir(filepath.Join(to, rel), 0o750)
+		case !info.Mode().IsRegular():
+			return fmt.Errorf("%s %w", filepath.ToSlash(rel), errNotPlain)
+		}
+
+		return copyMode(p, filepath.Join(to, rel), info.Mode().Perm())
+	})
+	if err != nil {
+		return fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
+	}
+
+	return nil
+}
+
+func copyMode(from, to string, mode fs.FileMode) error {
+	in, err := os.Open(from) //nolint:gosec // a file of the repository being copied
+	if err != nil {
+		return err //nolint:wrapcheck // the caller says whose
+	}
+	defer in.Close() //nolint:errcheck // read only
+
+	out, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode|0o600) //nolint:gosec // the copy's own file
 	if err != nil {
 		return err //nolint:wrapcheck // the caller says whose
 	}

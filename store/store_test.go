@@ -594,7 +594,7 @@ platforms: [` + host + `]
 		return strings.TrimSpace(string(out))
 	}
 
-	if got := says(""); got != "+"+commit {
+	if got := says(""); got != "0.0.0-dev+"+commit[:12]+"+"+commit {
 		t.Fatalf("without a version: %q", got)
 	}
 
