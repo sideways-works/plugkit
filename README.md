@@ -135,10 +135,16 @@ asset directories that go with the program. Unknown keys are refused.
 `build` runs the command in that image through `container`, once per
 platform, with the repository mounted read-only, `{out}` the only place it
 can write, no network unless the manifest asks for one, and `GOFLAGS=-trimpath`.
-It lays the plugin out as its zip holds it. The command and its environment may also name `{commit}`, the full commit
-built, and `{version}`, the version of the tag the build came through
-(`repository.At`, or a `store.Pin` naming its version), empty otherwise, to
-stamp the program as a release is stamped. A build with a version is kept
+It lays the plugin out as its zip holds it. `build.run` is an argv, or a list of them run in order, each in a container
+of its own with no shell around it; the first that fails ends the build.
+`build.copy: true` runs them in a writable copy of the repository, made in
+Go with `.git` left out and a symlink refused, for a build that writes
+beside its sources, as `npm ci` does. The commands and their environment
+may also name `{commit}`, the full commit built, and `{version}`, the
+version of the tag the build came through (`repository.At`, or a
+`store.Pin` naming its version) without its `v`, or `0.0.0-dev+<the
+commit's first 12 characters>` when it came through none, a version Go and
+npm both take, to stamp the program as a release is stamped. A build with a version is kept
 apart from one of the same commit without. `bundle` packs that layout into
 a zip with fixed times and sorted entries, so the same build gives the same
 bytes, and unpacks one safely. `manifest.yaml` must sit at the zip's top
