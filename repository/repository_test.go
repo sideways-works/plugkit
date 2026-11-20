@@ -529,3 +529,23 @@ func TestAllowLocalIsForTests(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// List gives each plugin its spec from the default branch's manifest, and At the version's.
+func TestListAndAtGiveTheSpec(t *testing.T) {
+	r := newRepo(t)
+	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints") + "spec: {level: 1}\n"})
+	r.git("tag", "v1.0.0")
+	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints") + "spec: {level: 2}\n"})
+	r.git("tag", "v1.1.0")
+
+	url := r.bare()
+
+	got, err := List(context.Background(), url, Options{})
+	if err != nil || len(got) != 1 || string(got[0].Spec) != `{"level":2}` {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	if m, _, err := At(context.Background(), url, ".", "1.0.0", Options{}); err != nil || string(m.Spec) != `{"level":1}` {
+		t.Fatalf("at 1.0.0: %s %v", m.Spec, err)
+	}
+}

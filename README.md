@@ -202,6 +202,15 @@ needs neither. A zip whose manifest includes a path it holds no file of is
 refused. The cache keeps an included plugin of a commit under the commit,
 like any build.
 
+A manifest's optional `spec` is a mapping for the host: plugkit carries it
+and never looks into it. `Manifest.Spec` holds it as JSON with its keys
+sorted, so a host reads one form; `repository.List` gives each plugin the
+default branch's (`Plugin.Spec`), `At` the version's, and the zip and the
+store keep it with the manifest's bytes. A spec that is no mapping, that
+JSON can't say (an anchor or alias, a merge key, a key that is no string or
+is there twice, a tag of its own, an infinite or NaN number), or that is
+over 64 KiB as JSON is refused.
+
 A manifest's optional `runtime` says what runs the program besides the
 machine, with an optional semver range: `node` or `"node >=22 <27"` for a
 `.mjs` program. Without one the program is a native binary, so a host

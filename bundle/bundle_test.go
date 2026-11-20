@@ -317,3 +317,19 @@ func TestUnpackChecksIncludedPaths(t *testing.T) {
 		})
 	}
 }
+
+// A manifest's spec goes through a zip with the manifest's bytes, and reads as it did.
+func TestASpecGoesThroughTheZip(t *testing.T) {
+	text := includedManifest + "spec:   # the host's\n  port: 8080\n  conf: {path: conf/cache.conf}\n"
+	entries := append([]entry{{"manifest.yaml", 0o644, text}}, includedPlugin[1:]...)
+	dest := filepath.Join(t.TempDir(), "plugin")
+
+	m, err := Unpack(writeZip(t, packed(t, layout(t, entries...))), dest, Limits{})
+	if err != nil || string(m.Spec) != `{"conf":{"path":"conf/cache.conf"},"port":8080}` {
+		t.Fatalf("spec %s: %v", m.Spec, err)
+	}
+
+	if data, _ := os.ReadFile(filepath.Join(dest, "manifest.yaml")); string(data) != text { //nolint:errcheck // compared
+		t.Fatalf("the manifest changed:\n%s", data)
+	}
+}

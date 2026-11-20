@@ -394,3 +394,66 @@ func TestIncludedPathsAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// A spec is carried as JSON, its keys sorted, and nothing in it is checked.
+func TestASpecIsCarriedAsJSON(t *testing.T) {
+	m, err := Parse([]byte(included + `spec:
+  port: 8080
+  ratio: 0.5
+  name: cache
+  on: true
+  none: null
+  since: 2026-01-02
+  octal: 0o17
+  tags: [a, "1"]
+  nested: {deep: [{x: 1}]}
+  unknown-to-plugkit: {anything: goes}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `{"name":"cache","nested":{"deep":[{"x":1}]},"none":null,"octal":15,"on":true,"port":8080,"ratio":0.5,"since":"2026-01-02","tags":["a","1"],"unknown-to-plugkit":{"anything":"goes"}}`
+	if string(m.Spec) != want {
+		t.Fatalf("spec %s\nwant %s", m.Spec, want)
+	}
+
+	if m, err := Parse([]byte(included)); err != nil || m.Spec != nil {
+		t.Fatalf("no spec: %s %v", m.Spec, err)
+	}
+
+	if m, err := Parse([]byte(included + "spec: {}\n")); err != nil || string(m.Spec) != "{}" {
+		t.Fatalf("an empty spec: %s %v", m.Spec, err)
+	}
+}
+
+func TestSpecsAreRefused(t *testing.T) {
+	cases := map[string]struct{ spec, says string }{
+		"a list":             {"spec: [a, b]\n", "spec (line 5): a mapping"},
+		"a string":           {"spec: cache\n", "a mapping"},
+		"left empty":         {"spec:\n", "a mapping"},
+		"a number key":       {"spec: {1: a}\n", `key "1" is no string`},
+		"a bool key":         {"spec: {true: a}\n", `key "true" is no string`},
+		"a list key":         {"spec: {[a]: b}\n", "is no string"},
+		"a merge key":        {"spec:\n  base: &b {x: 1}\n  more: {<<: *b}\n", "anchor or alias"},
+		"an alias":           {"spec:\n  a: &x 1\n  b: *x\n", "anchor or alias"},
+		"a merge alone":      {"spec:\n  <<: {x: 1}\n", `key "<<" is no string`},
+		"a key twice":        {"spec:\n  a: 1\n  a: 2\n", `key "a" is there twice`},
+		"infinity":           {"spec: {x: .inf}\n", ".inf is no finite number"},
+		"not a number":       {"spec: {x: .nan}\n", ".nan is no finite number"},
+		"a tag of its own":   {"spec: {x: !secret v}\n", "tag !secret"},
+		"binary":             {"spec: {x: !!binary aGk=}\n", "tag !!binary"},
+		"an integer too big": {"spec: {x: !!int 99999999999999999999}\n", "no 64-bit integer"},
+		"too big":            {"spec: {x: \"" + strings.Repeat("a", MaxSpec) + "\"}\n", "more than 65536"},
+		"nested too deep":    {"spec: {x: " + strings.Repeat("[", maxSpecDepth+1) + strings.Repeat("]", maxSpecDepth+1) + "}\n", "nested more than"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(included + c.spec))
+			if !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want an error saying %q", err, c.says)
+			}
+		})
+	}
+}

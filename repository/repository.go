@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -160,6 +161,8 @@ type Plugin struct {
 	LogoData []byte
 	LogoType string
 	LogoErr  error
+	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
+	Spec     json.RawMessage
 	Versions []Version
 	Err      error
 }
@@ -626,7 +629,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		return Plugin{}, err
 	}
 
-	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo}
+	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo, Spec: m.Spec}
 
 	if p.Name == "" {
 		p.Name = m.Name

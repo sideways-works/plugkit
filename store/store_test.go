@@ -892,3 +892,30 @@ func TestAnIncludedSymlinkOfACommitIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A manifest's spec is in the resolved manifest, from a commit and from a zip.
+func TestASpecIsResolved(t *testing.T) {
+	text := includedManifest + "spec:\n  port: 8080\n"
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": text, "service.yaml": "s", "conf/cache.conf": "c"})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "cache")
+
+	r, err := Store{Dir: t.TempDir(), Tool: "/nonexistent/docker"}.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host)
+	if err != nil || string(r.Manifest.Spec) != `{"port":8080}` {
+		t.Fatalf("by commit: %s %v", r.Manifest.Spec, err)
+	}
+
+	var z bytes.Buffer
+	if err := bundle.Pack(r.Dir, &z); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, _ := serve(t, map[string][]byte{"/cache.zip": z.Bytes()})
+
+	r, err = Store{Dir: t.TempDir(), Client: srv.Client()}.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/cache.zip", SHA256: sum(z.Bytes())}}, host)
+	if err != nil || string(r.Manifest.Spec) != `{"port":8080}` {
+		t.Fatalf("by zip: %s %v", r.Manifest.Spec, err)
+	}
+}

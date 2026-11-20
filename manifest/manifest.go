@@ -66,6 +66,16 @@ type Manifest struct {
 	AckTimeout string `yaml:"ack_timeout"`
 	// Permissions are what the plugin lets people do, each granted by default from a role up.
 	Permissions []Permission `yaml:"permissions"`
+	// Spec is the manifest's spec, a mapping for the host to read and check, as JSON; plugkit
+	// carries it and never looks into it. Empty when the manifest has none.
+	Spec json.RawMessage `yaml:"-"`
+}
+
+// document is a manifest as its YAML holds it: spec is read as a node, to convert to JSON.
+type document struct {
+	Manifest `yaml:",inline"`
+
+	Spec yaml.Node `yaml:"spec"`
 }
 
 // Permission is one thing a plugin lets people do: its name (area:action), what it allows, and the
@@ -143,15 +153,15 @@ var (
 	knownHold = []string{"{out}", "{os}", "{arch}", "{commit}", "{version}"}
 )
 
-// Parse reads a manifest and refuses unknown keys, an image without a digest, and placeholders
-// other than {out}, {os} and {arch}.
+// Parse reads a manifest and refuses unknown keys, an image without a digest, placeholders
+// other than {out}, {os} and {arch}, and a spec that is no mapping JSON can say.
 func Parse(data []byte) (Manifest, error) {
-	var m Manifest
+	var d document
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	if err := dec.Decode(&m); err != nil {
+	if err := dec.Decode(&d); err != nil {
 		if errors.Is(err, io.EOF) {
 			return Manifest{}, fmt.Errorf("%w: empty", ErrManifest)
 		}
@@ -163,6 +173,15 @@ func Parse(data []byte) (Manifest, error) {
 	if err := dec.Decode(&more); !errors.Is(err, io.EOF) {
 		return Manifest{}, fmt.Errorf("%w: one document only", ErrManifest)
 	}
+
+	m := d.Manifest
+
+	spec, err := specOf(&d.Spec)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%w: %w", ErrManifest, err)
+	}
+
+	m.Spec = spec
 
 	if problems := m.check(); len(problems) > 0 {
 		return Manifest{}, fmt.Errorf("%w: %s", ErrManifest, strings.Join(problems, "; "))
