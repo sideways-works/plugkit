@@ -55,7 +55,20 @@ type Manifest struct {
 	// AckTimeout, of a meta plugin alone, is a Go duration: how long a receiver has to ack or nack
 	// each message.
 	AckTimeout string `yaml:"ack_timeout"`
+	// Permissions are what the plugin lets people do, each granted by default from a role up.
+	Permissions []Permission `yaml:"permissions"`
 }
+
+// Permission is one thing a plugin lets people do: its name (area:action), what it allows, and the
+// least role that has it by default.
+type Permission struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Default     string `yaml:"default"`
+}
+
+// Roles are the roles a permission's default may name, least first.
+var Roles = []string{"display", "viewer", "operator", "maintainer", "admin"}
 
 // Schema is a meta plugin's message: the JSON Schema files of the message and of its answer.
 type Schema struct {
@@ -132,6 +145,7 @@ func (m Manifest) check() []string {
 	}
 
 	m.checkListing(add)
+	m.checkPermissions(add)
 
 	if m.Kind == KindMeta {
 		m.checkMeta(add)
@@ -155,7 +169,13 @@ func (m Manifest) check() []string {
 	}
 
 	m.Build.check(m.AnyPlatform(), add)
+	m.checkLayout(add)
 
+	return bad
+}
+
+// checkLayout checks the files and assets the zip holds beside the program.
+func (m Manifest) checkLayout(add func(string, ...any)) {
 	seen := map[string]bool{}
 
 	for _, f := range m.Files {
@@ -182,8 +202,6 @@ func (m Manifest) check() []string {
 			add("assets: %q: another entry of the zip's top level has the name %s", a, top)
 		}
 	}
-
-	return bad
 }
 
 func (m Manifest) checkListing(add func(string, ...any)) {
@@ -197,6 +215,31 @@ func (m Manifest) checkListing(add func(string, ...any)) {
 			if _, err := semver.ParseRange(strings.TrimSpace(r)); !ok || !name.MatchString(n) || err != nil {
 				add("%s: %q: <name> <semver range>, such as \"store >=1.2 <2\"", key, e)
 			}
+		}
+	}
+}
+
+var permissionName = regexp.MustCompile(`^[a-z-]+:[a-z-]+$`)
+
+func (m Manifest) checkPermissions(add func(string, ...any)) {
+	seen := map[string]bool{}
+
+	for i, p := range m.Permissions {
+		switch {
+		case !permissionName.MatchString(p.Name):
+			add("permissions[%d].name %q: area:action, lower-case letters and dashes", i, p.Name)
+		case seen[p.Name]:
+			add("permissions[%d]: %s is there twice", i, p.Name)
+		}
+
+		seen[p.Name] = true
+
+		if strings.TrimSpace(p.Description) == "" {
+			add("permissions[%d] (%s): description is missing", i, p.Name)
+		}
+
+		if !slices.Contains(Roles, p.Default) {
+			add("permissions[%d] (%s): default %q is none of %s", i, p.Name, p.Default, strings.Join(Roles, ", "))
 		}
 	}
 }

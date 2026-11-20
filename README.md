@@ -169,6 +169,12 @@ an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
 message. It resolves to its directory as a plugin built for `[any]` does,
 and nothing of it is built.
 
+A manifest of any kind may list its `permissions`, what the plugin lets
+people do: each a `name` (`area:action`, lower-case letters and dashes,
+unique), a `description`, and the least role that holds it by `default`,
+one of `display`, `viewer`, `operator`, `maintainer` and `admin`. A host
+grants and checks them; the manifest only declares them.
+
 `repository` reads what a plugin repository holds, from
 `repository-manifest.yaml` at its root (or a root `manifest.yaml` with a
 `plugins` list), and lists its plugins' versions with plain git: `git

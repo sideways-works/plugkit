@@ -196,3 +196,56 @@ assets: [dist]
 		t.Fatal(err)
 	}
 }
+
+const permissions = `permissions:
+  - {name: runs:read, description: See the runs and their logs, default: viewer}
+  - {name: runs:re-run, description: Run a failed batch again, default: operator}
+`
+
+func TestPermissionsAreReadOnEveryKind(t *testing.T) {
+	for _, base := range []string{good, meta} {
+		m, err := Parse([]byte(base + permissions))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(m.Permissions) != 2 || m.Permissions[1] != (Permission{Name: "runs:re-run", Description: "Run a failed batch again", Default: "operator"}) {
+			t.Fatalf("permissions %+v", m.Permissions)
+		}
+	}
+
+	for _, role := range Roles {
+		if _, err := Parse([]byte(good + strings.Replace(permissions, "default: viewer", "default: "+role, 1))); err != nil {
+			t.Errorf("%s: %v", role, err)
+		}
+	}
+}
+
+func TestPermissionsAreRefused(t *testing.T) {
+	cases := map[string]struct{ from, to, says string }{
+		"a name without an area": {"name: runs:read", "name: read", `"read": area:action`},
+		"a name in capitals":     {"name: runs:read", "name: Runs:read", `"Runs:read": area:action`},
+		"a name with a digit":    {"name: runs:read", "name: runs2:read", `"runs2:read": area:action`},
+		"a name with two colons": {"name: runs:read", "name: runs:read:all", `area:action`},
+		"a name twice":           {"name: runs:re-run", "name: runs:read", "runs:read is there twice"},
+		"no description":         {"description: See the runs and their logs, ", "", "description is missing"},
+		"an empty description":   {"See the runs and their logs", `" "`, "description is missing"},
+		"no default":             {", default: viewer", "", `default "" is none of`},
+		"an unknown role":        {"default: viewer", "default: owner", `default "owner" is none of display, viewer, operator, maintainer, admin`},
+		"an unknown key":         {"default: viewer}", "default: viewer, scope: all}", "field scope not found"},
+		"permissions not a list": {permissions, "permissions: {runs:read: viewer}\n", "cannot unmarshal"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(permissions, c.from) {
+				t.Fatalf("the fixture has no %q", c.from)
+			}
+
+			_, err := Parse([]byte(good + strings.Replace(permissions, c.from, c.to, 1)))
+			if !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", err, c.says)
+			}
+		})
+	}
+}
