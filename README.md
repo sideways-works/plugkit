@@ -151,7 +151,12 @@ the cache. A commit is fetched into a bare mirror, built for the platform
 and kept under a key of its repository, commit, path, manifest digest,
 platform and image digest. A zip is downloaded, checked against its sha256
 before it is opened, unpacked and kept under that sha256. The same key
-never builds or downloads twice, and every entry appears whole, by a rename.
+never builds or downloads twice, and every entry appears whole, by a rename:
+two resolves at once, in one process or several, each work in a directory
+of their own, the first rename wins and the other takes its entry. Each
+fetches a commit into a repository of its own, so no git repository is
+written by two at once. A server that serves no commit by its id gets the
+pin's `Ref` fetched instead, never every branch and tag.
 `store.Trim` removes what no resolve used lately.
 
 ```go
@@ -169,6 +174,11 @@ an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
 message. It resolves to its directory as a plugin built for `[any]` does,
 and nothing of it is built.
 
+A manifest's optional `runtime` says what runs the program besides the
+machine, with an optional semver range: `node` or `"node >=22 <27"` for a
+`.mjs` program. Without one the program is a native binary, so a host
+without the runtime can refuse the plugin before it fetches it.
+
 A manifest of any kind may list its `permissions`, what the plugin lets
 people do: each a `name` (`area:action`, lower-case letters and dashes,
 unique), a `description`, and the least role that holds it by `default`,
@@ -181,7 +191,14 @@ grants and checks them; the manifest only declares them.
 ls-remote --tags` for the versions, one shallow fetch of the default branch
 for the manifests, and the caller's git credentials. No forge's API is used.
 A repository with neither file at its root but a plugin's `manifest.yaml`
-is that one plugin, at `.`, tagged `v{version}`.
+is that one plugin, at `.`, tagged `v{version}`. A plugin whose manifest
+doesn't read is listed with its `Err`, and the others as they are; only a
+repository manifest that doesn't read fails the listing. Each version
+names its tag and commit, and a plugin its logo's bytes when it is an SVG,
+PNG, JPEG or WebP image of at most 256 KiB, by its content. `At` reads a
+version's manifest at the commit its tag names, and refuses a tag that
+names another commit when read again after the fetch, or another than
+`Options.Commit`.
 
 ```yaml
 repository: 1                   # the format; another is refused
@@ -193,7 +210,7 @@ plugins:
 
 ```go
 plugins, err := repository.List(ctx, "https://git.example.com/acme/plugins", repository.Options{})
-m, commit, err := repository.At(ctx, "https://git.example.com/acme/plugins", "step/go-test", "0.2.0")
+m, commit, err := repository.At(ctx, "https://git.example.com/acme/plugins", "step/go-test", "0.2.0", repository.Options{})
 ```
 
 A server that runs `List` or `At` on URLs its users give sets
@@ -210,7 +227,9 @@ only credential; git gets it only for https on the credential's host. An
 ssh remote's host key must be in the caller's `KnownHosts`: without them,
 every ssh remote fails. `List` and `At`
 then also stop after `Timeout` and once their fetches write more than
-`MaxBytes`. Unset, git runs with the host's credentials, as a CI job needs.
+`MaxBytes`, and so does the store's fetch of an untrusted pin.
+`AllowLocal` lets an untrusted URL be `file://` or a local path, for tests
+alone. Unset, git runs with the host's credentials, as a CI job needs.
 
 `kit` is the generic part of a conformance kit: it calls a plugin in work
 directories of its own and holds the checks every kind shares. It fails a
