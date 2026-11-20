@@ -16,7 +16,6 @@ import (
 const manifestText = `# the plugin
 name:   hello
 kind: driver
-for: test
 program: hello
 build:
   image: golang@sha256:` + "564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1" + `

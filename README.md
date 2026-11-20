@@ -128,7 +128,7 @@ err := cmd.Run()
 ```
 
 A plugin can also come without a release. `manifest` reads the
-`manifest.yaml` in its directory: name, kind, the system it is for, program, the build's image
+`manifest.yaml` in its directory: name, kind, program, the build's image
 (pinned by digest), command and environment, its platforms (`os/arch`
 pairs, or `[any]` for one build that runs everywhere), and the files and
 asset directories that go with the program. Unknown keys are refused.
@@ -173,14 +173,6 @@ A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
 message. It resolves to its directory as a plugin built for `[any]` does,
 and nothing of it is built.
-
-Every manifest names the system it is for, `for: pipelinegen` say: a
-lower-case letter, then letters, digits and dashes. Kinds of one system
-share names with another's, so a host never runs a plugin made for
-another. `store.Store.For` refuses such a plugin before anything of it is
-built, unpacked or run (a zip's manifest is read before the rest of it is
-unpacked, and a cached plugin is checked again), `repository.At` does with
-`Options.For`, and a listing shows each plugin's `For`.
 
 A manifest's optional `runtime` says what runs the program besides the
 machine, with an optional semver range: `node` or `"node >=22 <27"` for a

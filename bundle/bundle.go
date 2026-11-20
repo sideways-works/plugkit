@@ -201,22 +201,6 @@ func readManifest(dir string) (manifest.Manifest, []byte, error) {
 	return m, data, nil
 }
 
-// ReadManifest is the manifest at the top level of the zip at file, read before anything else of it,
-// so a host can refuse the plugin before it is unpacked.
-func ReadManifest(file string, limits Limits) (manifest.Manifest, error) {
-	if limits.Bytes <= 0 {
-		limits.Bytes = DefaultLimits.Bytes
-	}
-
-	zr, err := zip.OpenReader(file)
-	if err != nil {
-		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBundle, err)
-	}
-	defer zr.Close() //nolint:errcheck // read only
-
-	return topManifest(zr.File, limits)
-}
-
 // Unpack checks the zip at file entry by entry and writes it into dest, which it creates: every
 // entry a part of the plugin its top-level manifest.yaml names, none a symlink, none outside dest,
 // none executable but the program, and all within limits. On an error dest may hold part of it;

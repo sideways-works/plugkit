@@ -154,8 +154,7 @@ func local(p string) bool {
 // Plugin is a plugin of a repository as a listing shows it, its versions newest first. Err says
 // why its manifest couldn't be read, and the listing holds the other plugins all the same.
 type Plugin struct {
-	// For is the system the plugin is for, from its manifest at the default branch's head.
-	Path, Name, Kind, For, Description, Logo string
+	Path, Name, Kind, Description, Logo string
 	// LogoData is the logo's content and LogoType its media type: an SVG, PNG, JPEG or WebP image
 	// of at most MaxLogo bytes, by its content. LogoErr says why there is none.
 	LogoData []byte
@@ -201,8 +200,6 @@ type Options struct {
 	MaxBytes int64
 	// Commit is the commit At must find the version's tag naming, when the caller knows it.
 	Commit string
-	// For is the system the caller is: At refuses a plugin whose manifest at the tag is for another.
-	For string
 	// AllowLocal lets an untrusted URL be file:// or a local path: for tests alone, as a local path
 	// reads the host's own files.
 	AllowLocal bool
@@ -384,10 +381,6 @@ func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Ma
 	m, err := g.manifest(ctx, commit, r.Plugins[i].Manifest)
 	if err != nil {
 		return manifest.Manifest{}, "", err
-	}
-
-	if err := m.CheckFor(opt.For); err != nil {
-		return manifest.Manifest{}, "", fmt.Errorf("%w: %s at %s: %w", ErrRepository, url, tag, err)
 	}
 
 	beforeRecheck()
@@ -634,8 +627,6 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 	}
 
 	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo}
-
-	p.For = m.For
 
 	if p.Name == "" {
 		p.Name = m.Name
