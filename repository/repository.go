@@ -13,15 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/sideways-works/plugkit/gitsafe"
@@ -151,16 +151,34 @@ func local(p string) bool {
 	return relPath.MatchString(p) && !slices.Contains(parts, "..") && !slices.Contains(parts, ".")
 }
 
-// Plugin is a plugin of a repository as a listing shows it, its versions newest first.
+// Plugin is a plugin of a repository as a listing shows it, its versions newest first. Err says
+// why its manifest couldn't be read, and the listing holds the other plugins all the same.
 type Plugin struct {
 	Path, Name, Kind, Description, Logo string
-	Versions                            []Version
+	// LogoData is the logo's content and LogoType its media type: an SVG, PNG, JPEG or WebP image
+	// of at most MaxLogo bytes, by its content. LogoErr says why there is none.
+	LogoData []byte
+	LogoType string
+	LogoErr  error
+	Versions []Version
+	Err      error
 }
 
+// Version is a version of a plugin, its tag and the commit the tag names.
 type Version struct {
-	Version string
-	Commit  string
+	Version, Tag, Commit string
 }
+
+// beforeRecheck runs between At's fetch of a tag and its second look at it; tests move the tag there.
+var beforeRecheck = func() {}
+
+// MaxLogo bounds a logo's bytes in a listing.
+const MaxLogo = 256 << 10
+
+var (
+	ErrLogo  = errors.New("logo")
+	ErrMoved = errors.New("the tag moved")
+)
 
 type Options struct {
 	// Prereleases lists versions with a pre-release part too.
@@ -180,6 +198,11 @@ type Options struct {
 	// 256 MiB.
 	Timeout  time.Duration
 	MaxBytes int64
+	// Commit is the commit At must find the version's tag naming, when the caller knows it.
+	Commit string
+	// AllowLocal lets an untrusted URL be file:// or a local path: for tests alone, as a local path
+	// reads the host's own files.
+	AllowLocal bool
 
 	// env is added last, for tests that must give git what Untrusted takes away.
 	env []string
@@ -195,7 +218,7 @@ func open(ctx context.Context, url string, opt Options) (*git, context.Context, 
 	cancel := context.CancelFunc(func() {})
 
 	if opt.Untrusted {
-		if err := gitsafe.CheckURL(url); err != nil {
+		if err := gitsafe.Check(url, opt.AllowLocal); err != nil {
 			return nil, nil, nil, fmt.Errorf("%w: %w", ErrRepository, err)
 		}
 
@@ -243,19 +266,18 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 	seen := map[string]bool{}
 
 	for _, e := range r.Plugins {
-		p, err := g.plugin(ctx, head, e)
-		if err != nil {
-			return nil, err
+		p := g.listed(ctx, head, e)
+		if p.Err == nil && seen[p.Name] {
+			p.Err = fmt.Errorf("%w: another plugin is named %s", ErrRepository, p.Name)
 		}
 
-		if seen[p.Name] {
-			return nil, fmt.Errorf("%w: two plugins are named %s", ErrRepository, p.Name)
-		}
+		seen[p.Name] = p.Name != ""
 
-		seen[p.Name] = true
-
-		if p.Versions, err = versions(r.Tags, p, tags, opt.Prereleases); err != nil {
-			return nil, err
+		// without its name, a plugin whose manifest didn't read has no tags to tell
+		if p.Name != "" || !strings.Contains(r.Tags, "{name}") {
+			if p.Versions, err = versions(r.Tags, p, tags, opt.Prereleases); err != nil {
+				return nil, err
+			}
 		}
 
 		out = append(out, p)
@@ -264,14 +286,64 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 	return out, nil
 }
 
-// At is the manifest of the plugin at path in the repository at url, read at the commit its tag
-// for version names, and that commit.
-func At(ctx context.Context, url, dir, version string) (manifest.Manifest, string, error) {
-	return AtWith(ctx, url, dir, version, Options{Prereleases: true})
+// listed is e as a listing shows it, with Err set when its manifest at commit doesn't read.
+func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
+	p, err := g.plugin(ctx, commit, e)
+	if err != nil {
+		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo, Err: err}
+	}
+
+	if p.Logo != "" {
+		p.LogoData, p.LogoType, p.LogoErr = g.logo(ctx, commit, p.Logo)
+	}
+
+	return p
 }
 
-// AtWith is At with git as opt says.
-func AtWith(ctx context.Context, url, dir, version string, opt Options) (manifest.Manifest, string, error) {
+// logo is the image at name and its media type: SVG, PNG, JPEG or WebP by its content, within
+// MaxLogo bytes.
+func (g *git) logo(ctx context.Context, commit, name string) ([]byte, string, error) {
+	size, err := g.run(ctx, "cat-file", "-s", commit+":"+name)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, name, err)
+	}
+
+	if n, err := strconv.ParseInt(strings.TrimSpace(string(size)), 10, 64); err != nil || n > MaxLogo {
+		return nil, "", fmt.Errorf("%w %s: over %d bytes", ErrLogo, name, MaxLogo)
+	}
+
+	data, err := g.run(ctx, "cat-file", "blob", commit+":"+name)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, name, err)
+	}
+
+	typ := imageType(data)
+	if typ == "" {
+		return nil, "", fmt.Errorf("%w %s: neither SVG, PNG, JPEG nor WebP", ErrLogo, name)
+	}
+
+	return data, typ, nil
+}
+
+// imageType is data's media type when it is an image a listing shows, by its content.
+func imageType(data []byte) string {
+	switch t := http.DetectContentType(data); t {
+	case "image/png", "image/jpeg", "image/webp":
+		return t
+	case "text/xml; charset=utf-8", "text/plain; charset=utf-8":
+		head := bytes.ToLower(data[:min(len(data), 1024)])
+		if bytes.Contains(head, []byte("<svg")) {
+			return "image/svg+xml"
+		}
+	}
+
+	return ""
+}
+
+// At is the manifest of the plugin at path in the repository at url, read at the commit its tag
+// for version names, and that commit. It refuses a tag that names another commit once read than it
+// did when fetched, and one that names another commit than opt.Commit when that is set.
+func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Manifest, string, error) {
 	g, ctx, cancel, err := open(ctx, url, opt)
 	if err != nil {
 		return manifest.Manifest{}, "", err
@@ -311,6 +383,20 @@ func AtWith(ctx context.Context, url, dir, version string, opt Options) (manifes
 		return manifest.Manifest{}, "", err
 	}
 
+	beforeRecheck()
+
+	// the tag is read again: one moved while it was fetched names another commit than the one read
+	now, err := g.tags(ctx, url, "refs/tags/"+tag, "refs/tags/"+tag+"^{}")
+
+	switch {
+	case err != nil:
+		return manifest.Manifest{}, "", err
+	case now[tag] != commit:
+		return manifest.Manifest{}, "", fmt.Errorf("%w: %s's tag %s named %s when fetched and names %q now", ErrMoved, url, tag, commit, now[tag])
+	case opt.Commit != "" && opt.Commit != commit:
+		return manifest.Manifest{}, "", fmt.Errorf("%w: %s's tag %s names %s, not %s", ErrMoved, url, tag, commit, opt.Commit)
+	}
+
 	return m, commit, nil
 }
 
@@ -347,7 +433,7 @@ func versions(pattern string, p Plugin, tags map[string]string, pre bool) ([]Ver
 			continue
 		}
 
-		all = append(all, found{Version{Version: m[1], Commit: commit}, v})
+		all = append(all, found{Version{Version: m[1], Tag: tag, Commit: commit}, v})
 	}
 
 	slices.SortFunc(all, func(a, b found) int { return b.v.Compare(a.v) })
@@ -390,6 +476,9 @@ func newGit(ctx context.Context, url string, opt Options) (*git, error) {
 		}
 
 		g.env = gitsafe.Env(os.Environ(), home, url, opt.Credential)
+		if opt.AllowLocal {
+			g.env = gitsafe.AllowLocal(g.env)
+		}
 	} else {
 		g.env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), opt.GitEnv...)
 	}
@@ -412,90 +501,17 @@ func (g *git) run(ctx context.Context, args ...string) ([]byte, error) {
 		args = append([]string{"-C", g.repo}, args...)
 	}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	out, err := gitsafe.Run(ctx, func(ctx context.Context) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // git, reading the repository the caller names
+		cmd.Env = g.env
 
-	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // git, reading the repository the caller names
-	cmd.Env = g.env
-
-	var out, errOut bytes.Buffer
-
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("%w: git: %w", ErrRepository, err)
+		return cmd
+	}, g.dir, g.maxBytes)
+	if err != nil {
+		return nil, fmt.Errorf("%w: git %s: %w", ErrRepository, strings.Join(args, " "), err)
 	}
 
-	over := g.watch(ctx, cancel)
-
-	err := cmd.Wait()
-
-	switch {
-	case over():
-		return nil, fmt.Errorf("%w: git %s: %w of %d bytes", ErrRepository, strings.Join(args, " "), errTooBig, g.maxBytes)
-	case ctx.Err() != nil && err != nil:
-		return nil, fmt.Errorf("%w: git %s: %w", ErrRepository, strings.Join(args, " "), ctx.Err())
-	case err != nil:
-		return nil, fmt.Errorf("%w: git %s: %w: %s", ErrRepository, strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
-	}
-
-	return out.Bytes(), nil
-}
-
-var errTooBig = errors.New("over the size limit")
-
-// watch stops git through cancel once the scratch directory holds more than maxBytes, and says
-// whether it did; with no limit it watches nothing.
-func (g *git) watch(ctx context.Context, cancel context.CancelFunc) func() bool {
-	if g.maxBytes <= 0 {
-		return func() bool { return false }
-	}
-
-	var over atomic.Bool
-
-	go func() {
-		tick := time.NewTicker(50 * time.Millisecond)
-		defer tick.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				if sizeOf(g.dir) > g.maxBytes {
-					over.Store(true)
-					cancel()
-
-					return
-				}
-			}
-		}
-	}()
-
-	return func() bool {
-		// a last look, so a fetch that ended between two ticks is measured too
-		if sizeOf(g.dir) > g.maxBytes {
-			over.Store(true)
-		}
-
-		return over.Load()
-	}
-}
-
-func sizeOf(dir string) int64 {
-	var n int64
-
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error { //nolint:errcheck // a file gone mid-walk counts as nothing
-		if err == nil && !d.IsDir() {
-			if info, err := d.Info(); err == nil {
-				n += info.Size()
-			}
-		}
-
-		return nil
-	})
-
-	return n
+	return out, nil
 }
 
 // fetch fetches ref of url, one commit deep, and returns its commit.
@@ -513,8 +529,8 @@ func (g *git) fetch(ctx context.Context, url, ref string) (string, error) {
 }
 
 // tags are the repository's tags by name, each with its commit.
-func (g *git) tags(ctx context.Context, url string) (map[string]string, error) {
-	out, err := g.run(ctx, "ls-remote", "--tags", "--", url)
+func (g *git) tags(ctx context.Context, url string, patterns ...string) (map[string]string, error) {
+	out, err := g.run(ctx, append([]string{"ls-remote", "--tags", "--", url}, patterns...)...)
 	if err != nil {
 		return nil, err
 	}

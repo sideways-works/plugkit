@@ -130,17 +130,17 @@ func TestAMonorepoListsEachPluginWithItsTags(t *testing.T) {
 		t.Fatalf("x: %+v", x)
 	}
 
-	want := []Version{{"0.2.0", commits["0.2.0"]}, {"0.1.0", commits["0.1.0"]}}
+	want := []Version{{"0.2.0", "step/go-test/v0.2.0", commits["0.2.0"]}, {"0.1.0", "step/go-test/v0.1.0", commits["0.1.0"]}}
 	if !slices.Equal(goTest.Versions, want) {
 		t.Fatalf("go-test's versions %+v, want %+v", goTest.Versions, want)
 	}
 
-	if !slices.Equal(x.Versions, []Version{{"1.0.0", commits["0.1.0"]}}) {
+	if !slices.Equal(x.Versions, []Version{{"1.0.0", "sbom/x/v1.0.0", commits["0.1.0"]}}) {
 		t.Fatalf("x's versions %+v", x.Versions)
 	}
 
 	pre, err := List(context.Background(), url, Options{Prereleases: true})
-	if err != nil || len(pre[0].Versions) != 3 || pre[0].Versions[0] != (Version{"0.3.0-rc.1", commits["0.3.0-rc.1"]}) {
+	if err != nil || len(pre[0].Versions) != 3 || pre[0].Versions[0] != (Version{"0.3.0-rc.1", "step/go-test/v0.3.0-rc.1", commits["0.3.0-rc.1"]}) {
 		t.Fatalf("with prereleases: %+v %v", pre, err)
 	}
 }
@@ -148,21 +148,21 @@ func TestAMonorepoListsEachPluginWithItsTags(t *testing.T) {
 func TestAtReadsThePluginsManifestAtItsTag(t *testing.T) {
 	url, commits := monorepo(t)
 
-	m, commit, err := At(context.Background(), url, "step/go-test", "0.1.0")
+	m, commit, err := At(context.Background(), url, "step/go-test", "0.1.0", Options{})
 	if err != nil || commit != commits["0.1.0"] || m.Description != "Runs go test, first" {
 		t.Fatalf("0.1.0: %+v %s %v", m, commit, err)
 	}
 
-	m, commit, err = At(context.Background(), url, "step/go-test", "v0.2.0")
+	m, commit, err = At(context.Background(), url, "step/go-test", "v0.2.0", Options{})
 	if err != nil || commit != commits["0.2.0"] || m.Description != "Runs go test" {
 		t.Fatalf("0.2.0: %+v %s %v", m, commit, err)
 	}
 
-	if _, _, err := At(context.Background(), url, "step/go-test", "0.9.0"); !errors.Is(err, ErrRepository) || !strings.Contains(err.Error(), "no tag step/go-test/v0.9.0") {
+	if _, _, err := At(context.Background(), url, "step/go-test", "0.9.0", Options{}); !errors.Is(err, ErrRepository) || !strings.Contains(err.Error(), "no tag step/go-test/v0.9.0") {
 		t.Fatal(err)
 	}
 
-	if _, _, err := At(context.Background(), url, "step/nothing", "0.1.0"); !errors.Is(err, ErrRepository) {
+	if _, _, err := At(context.Background(), url, "step/nothing", "0.1.0", Options{}); !errors.Is(err, ErrRepository) {
 		t.Fatal(err)
 	}
 }
@@ -178,7 +178,7 @@ func TestARootManifestWithPluginsIsTheRepositorysManifest(t *testing.T) {
 	r.git("tag", "b-v0.0.1")
 
 	got, err := List(context.Background(), r.bare(), Options{})
-	if err != nil || len(got) != 2 || !slices.Equal(got[0].Versions, []Version{{"1.2.3", commit}}) || !slices.Equal(got[1].Versions, []Version{{"0.0.1", commit}}) {
+	if err != nil || len(got) != 2 || !slices.Equal(got[0].Versions, []Version{{"1.2.3", "a-v1.2.3", commit}}) || !slices.Equal(got[1].Versions, []Version{{"0.0.1", "b-v0.0.1", commit}}) {
 		t.Fatalf("%+v %v", got, err)
 	}
 }
@@ -197,7 +197,7 @@ func TestARepositoryOfOnePluginIsItsRootManifest(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 
-	if m, commit, err := At(context.Background(), url, ".", "1.0.0"); err != nil || commit != first || m.Name != "lint" {
+	if m, commit, err := At(context.Background(), url, ".", "1.0.0", Options{}); err != nil || commit != first || m.Name != "lint" {
 		t.Fatalf("at 1.0.0: %v", err)
 	}
 }
@@ -265,7 +265,7 @@ func TestAnUntrustedURLIsRefusedBeforeGitRuns(t *testing.T) {
 			t.Errorf("%s: %v", u, err)
 		}
 
-		if _, _, err := AtWith(context.Background(), u, "step/go-test", "0.1.0", Options{Untrusted: true}); !errors.Is(err, ErrRepository) {
+		if _, _, err := At(context.Background(), u, "step/go-test", "0.1.0", Options{Untrusted: true}); !errors.Is(err, ErrRepository) {
 			t.Errorf("At %s: %v", u, err)
 		}
 	}
@@ -430,5 +430,102 @@ func TestAnUntrustedHTTPSRemoteTakesTheCallersCredential(t *testing.T) {
 
 	if after != before {
 		t.Fatalf("the redirect reached the second server %d times", after-before)
+	}
+}
+
+func TestABrokenPluginManifestLeavesTheOthersListed(t *testing.T) {
+	r := newRepo(t)
+	png := "\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 64)
+	r.commit(map[string]string{
+		"repository-manifest.yaml": "repository: 1\nplugins:\n  - {manifest: good/manifest.yaml}\n  - {manifest: broken/manifest.yaml, name: broken}\n" +
+			"  - {manifest: gone/manifest.yaml}\n  - {manifest: big/manifest.yaml}\n  - {manifest: text/manifest.yaml}\n  - {manifest: drawn/manifest.yaml}\n",
+		"good/manifest.yaml":   pluginManifest("good", "driver", "Good"),
+		"good/logo.svg":        png,
+		"broken/manifest.yaml": pluginManifest("broken", "driver", "Broken") + "colour: red\n",
+		"big/manifest.yaml":    pluginManifest("big", "driver", "Big"),
+		"big/logo.svg":         png + strings.Repeat("x", MaxLogo),
+		"text/manifest.yaml":   pluginManifest("text", "driver", "Text"),
+		"text/logo.svg":        "not an image",
+		"drawn/manifest.yaml":  pluginManifest("drawn", "driver", "Drawn"),
+		"drawn/logo.svg":       `<?xml version="1.0"?>` + "\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
+	})
+	r.git("tag", "good-v1.0.0")
+	r.git("tag", "broken-v1.0.0")
+
+	got, err := List(context.Background(), r.bare(), Options{})
+	if err != nil || len(got) != 6 {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	byName := map[string]Plugin{}
+	for _, p := range got {
+		byName[p.Path] = p
+	}
+
+	switch good := byName["good"]; {
+	case good.Err != nil || good.LogoType != "image/png" || string(good.LogoData) != png || len(good.Versions) != 1 || good.Versions[0].Tag != "good-v1.0.0":
+		t.Fatalf("good: %+v", good)
+	case byName["broken"].Err == nil || !strings.Contains(byName["broken"].Err.Error(), "field colour not found") || len(byName["broken"].Versions) != 1:
+		t.Fatalf("broken: %+v", byName["broken"])
+	case byName["gone"].Err == nil || !strings.Contains(byName["gone"].Err.Error(), "no gone/manifest.yaml"):
+		t.Fatalf("gone: %+v", byName["gone"])
+	case byName["big"].Err != nil || !errors.Is(byName["big"].LogoErr, ErrLogo) || byName["big"].LogoData != nil:
+		t.Fatalf("big: %+v", byName["big"])
+	case byName["text"].Err != nil || !errors.Is(byName["text"].LogoErr, ErrLogo) || !strings.Contains(byName["text"].LogoErr.Error(), "neither SVG"):
+		t.Fatalf("text: %+v", byName["text"])
+	case byName["drawn"].LogoType != "image/svg+xml":
+		t.Fatalf("drawn: %+v", byName["drawn"])
+	}
+
+	r.commit(map[string]string{"repository-manifest.yaml": "repository: 1\nplugins: [{manifest: good/manifest.yaml, colour: red}]\n"})
+
+	if _, err := List(context.Background(), r.bare(), Options{}); !errors.Is(err, ErrRepository) {
+		t.Fatalf("a broken repository manifest: %v", err)
+	}
+}
+
+func TestAtRefusesATagThatMoved(t *testing.T) {
+	r := newRepo(t)
+	first := r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints")})
+	r.git("tag", "v1.0.0")
+	second := r.commit(map[string]string{"README": "x"})
+
+	url := r.bare()
+
+	if _, commit, err := At(context.Background(), url, ".", "1.0.0", Options{Commit: first}); err != nil || commit != first {
+		t.Fatalf("the expected commit: %s %v", commit, err)
+	}
+
+	if _, _, err := At(context.Background(), url, ".", "1.0.0", Options{Commit: second}); !errors.Is(err, ErrMoved) {
+		t.Fatalf("another expected commit: %v", err)
+	}
+
+	beforeRecheck = func() {
+		cmd := exec.CommandContext(context.Background(), "git", "-C", url, "tag", "-f", "v1.0.0", second)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("moving the tag: %v %s", err, out)
+		}
+	}
+
+	t.Cleanup(func() { beforeRecheck = func() {} })
+
+	if _, _, err := At(context.Background(), url, ".", "1.0.0", Options{}); !errors.Is(err, ErrMoved) || !strings.Contains(err.Error(), "names \""+second+"\" now") {
+		t.Fatalf("a tag moved between the fetch and the second look: %v", err)
+	}
+}
+
+func TestAllowLocalIsForTests(t *testing.T) {
+	url, _ := monorepo(t)
+
+	if _, err := List(context.Background(), url, Options{Untrusted: true, AllowLocal: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := List(context.Background(), "file://"+url, Options{Untrusted: true, AllowLocal: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := List(context.Background(), "ext::sh -c x", Options{Untrusted: true, AllowLocal: true}); !errors.Is(err, ErrRepository) {
+		t.Fatal(err)
 	}
 }
