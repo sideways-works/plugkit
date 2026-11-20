@@ -49,7 +49,7 @@ type seen struct {
 // exchange calls a real executable, round by round, keeping no state.
 func TestMain(m *testing.M) {
 	if os.Getenv("CONNECTOR_TEST_SERVE") == "" {
-		os.Exit(m.Run())
+		os.Exit(runTests(m))
 	}
 
 	handle := func(in []byte) (any, error) {
@@ -120,20 +120,46 @@ const (
 	reportToken  = "report-token-value-77ab"
 )
 
+// fakeConnectorPath is the fake connector's script, written once before any test runs: a test
+// that wrote it while a parallel test forked could find it busy ("text file busy"), as the fork
+// still held the file open for writing until its exec.
+var fakeConnectorPath string
+
+// runTests writes the fake connector, runs the tests and removes it.
+func runTests(m *testing.M) int {
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+
+		return 1
+	}
+
+	dir, err := os.MkdirTemp("", "exchange-test-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+
+		return 1
+	}
+	defer func() {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+	}()
+
+	fakeConnectorPath = filepath.Join(dir, "fake-connector")
+	if err := os.WriteFile(fakeConnectorPath, []byte("#!/bin/sh\nCONNECTOR_TEST_SERVE=1 exec '"+self+"' \"$@\"\n"), 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+
+		return 1
+	}
+
+	return m.Run()
+}
+
 func fakeConnector(t *testing.T) plugin.Plugin {
 	t.Helper()
 
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	path := filepath.Join(t.TempDir(), "fake-connector")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nCONNECTOR_TEST_SERVE=1 exec '"+self+"' \"$@\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	return plugin.Plugin{Name: "fake-connector", Path: path}
+	return plugin.Plugin{Name: "fake-connector", Path: fakeConnectorPath}
 }
 
 type host struct {
