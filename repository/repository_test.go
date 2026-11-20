@@ -2,13 +2,19 @@ package repository
 
 import (
 	"context"
+	"encoding/pem"
 	"errors"
+	"net/http"
+	"net/http/cgi" //nolint:gosec // git's own http-backend, serving the test's repository
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sideways-works/plugkit/gitsafe"
 )
 
 const image = "golang@sha256:564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1"
@@ -247,5 +253,107 @@ func TestRepositoryManifestsAreRefused(t *testing.T) {
 
 	if many, err := Parse([]byte("repository: 1\nplugins: [{manifest: a/manifest.yaml}]\n")); err != nil || many.Tags != "{name}-v{version}" {
 		t.Fatalf("a plugin in a directory: %+v %v", many, err)
+	}
+}
+
+func TestAnUntrustedURLIsRefusedBeforeGitRuns(t *testing.T) {
+	url, _ := monorepo(t)
+
+	for _, u := range []string{url, "file://" + url, "-uhack", "ext::sh -c touch% x", "./plugins.git"} {
+		if _, err := List(context.Background(), u, Options{Untrusted: true}); !errors.Is(err, ErrRepository) || !strings.Contains(err.Error(), "not a remote git may fetch from") {
+			t.Errorf("%s: %v", u, err)
+		}
+
+		if _, _, err := AtWith(context.Background(), u, "step/go-test", "0.1.0", Options{Untrusted: true}); !errors.Is(err, ErrRepository) {
+			t.Errorf("At %s: %v", u, err)
+		}
+	}
+
+	if _, err := List(context.Background(), url, Options{}); err != nil {
+		t.Fatalf("a trusted local repository: %v", err)
+	}
+}
+
+// git reaches an ssh remote through an ssh that sees nothing of the host's keys, config or agent.
+func TestAnUntrustedSSHRemoteGetsNoneOfTheHostsSSH(t *testing.T) {
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "ssh.log")
+
+	fake := "#!/bin/sh\n{ printf '%s\\n' \"$@\"; env; } > " + log + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SSH_AUTH_SOCK", "/host/agent")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/host/gitconfig")
+
+	opt := Options{Untrusted: true, env: []string{"PATH=" + bin + ":" + os.Getenv("PATH")}}
+	if _, err := List(context.Background(), "ssh://git@plugins.example.invalid/o/r.git", opt); err == nil {
+		t.Fatal("the stand-in ssh fetched something")
+	}
+
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := string(data)
+	for _, want := range []string{"IdentitiesOnly=yes\n", "IdentityFile=/dev/null\n", "BatchMode=yes\n", "-F\n/dev/null\n", "git@plugins.example.invalid\n",
+		"GIT_CONFIG_GLOBAL=/dev/null\n", "GIT_CONFIG_NOSYSTEM=1\n", "GIT_ALLOW_PROTOCOL=https:ssh\n"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ssh saw no %q:\n%s", want, got)
+		}
+	}
+
+	if strings.Contains(got, "SSH_AUTH_SOCK") || strings.Contains(got, "/host/gitconfig") {
+		t.Errorf("ssh saw the host's agent or config:\n%s", got)
+	}
+}
+
+// An untrusted https remote is fetched with the caller's credential alone, within the size cap.
+func TestAnUntrustedHTTPSRemoteTakesTheCallersCredential(t *testing.T) {
+	url, commits := monorepo(t)
+
+	execPath, err := exec.CommandContext(context.Background(), "git", "--exec-path").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &cgi.Handler{
+		Path: filepath.Join(strings.TrimSpace(string(execPath)), "git-http-backend"),
+		Env:  []string{"GIT_PROJECT_ROOT=" + filepath.Dir(url), "GIT_HTTP_EXPORT_ALL=1"},
+	}
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if user, pass, ok := r.BasicAuth(); !ok || user != "x-access-token" || pass != "s3cret" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="plugins"`)
+			http.Error(w, "who are you", http.StatusUnauthorized)
+
+			return
+		}
+
+		backend.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	remote := srv.URL + "/plugins.git"
+	opt := Options{Untrusted: true, Credential: gitsafe.Credential{Token: "s3cret"}, env: []string{"GIT_SSL_CAINFO=" + ca}}
+
+	got, err := List(context.Background(), remote, opt)
+	if err != nil || len(got) != 2 || got[0].Versions[0].Commit != commits["0.2.0"] {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	if _, err := List(context.Background(), remote, Options{Untrusted: true, env: opt.env}); err == nil {
+		t.Fatal("fetched with no credential")
+	}
+
+	opt.MaxBytes = 1 << 10
+	if _, err := List(context.Background(), remote, opt); !errors.Is(err, ErrRepository) || !strings.Contains(err.Error(), "over the size limit") {
+		t.Fatal(err)
 	}
 }

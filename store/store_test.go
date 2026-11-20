@@ -605,3 +605,20 @@ platforms: [` + host + `]
 		t.Fatalf("%d builds, want one without a version and one with", n)
 	}
 }
+
+func TestAnUntrustedStoreFetchesFromNoLocalPath(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": metaManifest})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "x")
+
+	pin := Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}
+
+	for _, repo := range []string{root, "file://" + root, "-uhack", "ext::sh -c x"} {
+		pin.Repository = repo
+		if _, err := (Store{Dir: t.TempDir(), Untrusted: true}).Resolve(context.Background(), pin, host); !errors.Is(err, ErrPin) || !strings.Contains(err.Error(), "not a remote git may fetch from") {
+			t.Errorf("%s: %v", repo, err)
+		}
+	}
+}

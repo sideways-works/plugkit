@@ -28,6 +28,7 @@ import (
 	"github.com/sideways-works/plugkit/build"
 	"github.com/sideways-works/plugkit/bundle"
 	"github.com/sideways-works/plugkit/fetch"
+	"github.com/sideways-works/plugkit/gitsafe"
 	"github.com/sideways-works/plugkit/manifest"
 	"github.com/sideways-works/plugkit/pin"
 )
@@ -74,6 +75,13 @@ type Store struct {
 	Limits bundle.Limits
 	// OnBuild, when set, is called with the key of each build before it starts.
 	OnBuild func(key string)
+	// Untrusted is for a pin from someone the host doesn't trust: as repository.Options.Untrusted,
+	// only an https or ssh repository, nothing of the host's git config, credential helpers or ssh
+	// keys, and Credential as the only credential; GitEnv is left out.
+	Untrusted  bool
+	Credential gitsafe.Credential
+	// home is git's HOME with Untrusted: an empty directory of the store's own.
+	home string
 }
 
 var (
@@ -202,6 +210,20 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		if r, err := s.found(filepath.Join(s.Dir, string(key)), osArch); err == nil {
 			return r, nil
 		}
+	}
+
+	if s.Untrusted {
+		if err := gitsafe.CheckURL(p.Repository); err != nil {
+			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
+		}
+
+		home, err := os.MkdirTemp(s.Dir, ".home-")
+		if err != nil {
+			return Resolved{}, fmt.Errorf("%w: %w", ErrPin, err)
+		}
+		defer os.RemoveAll(home) //nolint:errcheck // an empty scratch home
+
+		s.home = home
 	}
 
 	mirror, err := s.mirror(ctx, p.Repository, p.Commit)
@@ -376,10 +398,10 @@ func (s Store) mirror(ctx context.Context, repository, commit string) (string, e
 		return dir, nil
 	}
 
-	_, err := s.git(ctx, dir, "fetch", "-q", "--depth", "1", repository, commit)
+	_, err := s.git(ctx, dir, "fetch", "-q", "--depth", "1", "--", repository, commit)
 	if err != nil {
 		// a server that serves no commit by its id still serves its branches and tags
-		_, err = s.git(ctx, dir, "fetch", "-q", repository, "+refs/heads/*:refs/remotes/src/*", "+refs/tags/*:refs/tags/*")
+		_, err = s.git(ctx, dir, "fetch", "-q", "--", repository, "+refs/heads/*:refs/remotes/src/*", "+refs/tags/*:refs/tags/*")
 	}
 
 	if err != nil {
@@ -482,7 +504,11 @@ func (s Store) command(ctx context.Context, dir string, args ...string) *exec.Cm
 
 	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // git, fetching the pinned repository
 
-	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), s.GitEnv...)
+	if s.Untrusted {
+		cmd.Env = gitsafe.Env(os.Environ(), s.home, s.Credential)
+	} else {
+		cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), s.GitEnv...)
+	}
 
 	return cmd
 }

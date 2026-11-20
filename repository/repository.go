@@ -8,17 +8,23 @@ package repository
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
+	"github.com/sideways-works/plugkit/gitsafe"
 	"github.com/sideways-works/plugkit/manifest"
 	"github.com/sideways-works/plugkit/semver"
 	"go.yaml.in/yaml/v3"
@@ -159,17 +165,60 @@ type Version struct {
 type Options struct {
 	// Prereleases lists versions with a pre-release part too.
 	Prereleases bool
-	// GitEnv is added to git's environment, for credentials the caller gives git.
+	// GitEnv is added to git's environment, for credentials the caller gives git. Untrusted leaves
+	// it out.
 	GitEnv []string
+	// Untrusted is for a URL from someone the host doesn't trust, a server's user say: only an https
+	// or ssh remote, nothing of the host's git config, credential helpers or ssh keys, Credential as
+	// the only credential, and the fetches bounded by Timeout and MaxBytes.
+	Untrusted  bool
+	Credential gitsafe.Credential
+	// Timeout bounds List or At, MaxBytes what its fetches write; with Untrusted, 0 is 2 minutes and
+	// 256 MiB.
+	Timeout  time.Duration
+	MaxBytes int64
+
+	// env is added last, for tests that must give git what Untrusted takes away.
+	env []string
+}
+
+const (
+	defaultTimeout  = 2 * time.Minute
+	defaultMaxBytes = 256 << 20
+)
+
+// open checks url as opt says and starts git's scratch repository, with ctx bounded as opt says.
+func open(ctx context.Context, url string, opt Options) (*git, context.Context, context.CancelFunc, error) {
+	cancel := context.CancelFunc(func() {})
+
+	if opt.Untrusted {
+		if err := gitsafe.CheckURL(url); err != nil {
+			return nil, nil, nil, fmt.Errorf("%w: %w", ErrRepository, err)
+		}
+
+		timeout := cmp.Or(opt.Timeout, defaultTimeout)
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		opt.MaxBytes = cmp.Or(opt.MaxBytes, defaultMaxBytes)
+	}
+
+	g, err := newGit(ctx, opt)
+	if err != nil {
+		cancel()
+
+		return nil, nil, nil, err
+	}
+
+	return g, ctx, cancel, nil
 }
 
 // List lists the plugins of the repository at url with their versions: the tags git ls-remote
 // lists that match the manifest's tags, and the rest from one shallow fetch of its default branch.
 func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
-	g, err := newGit(ctx, opt.GitEnv)
+	g, ctx, cancel, err := open(ctx, url, opt)
 	if err != nil {
 		return nil, err
 	}
+	defer cancel()
 	defer g.close()
 
 	head, err := g.fetch(ctx, url, "HEAD")
@@ -218,12 +267,13 @@ func At(ctx context.Context, url, dir, version string) (manifest.Manifest, strin
 	return AtWith(ctx, url, dir, version, Options{Prereleases: true})
 }
 
-// AtWith is At with git's environment from opt.
+// AtWith is At with git as opt says.
 func AtWith(ctx context.Context, url, dir, version string, opt Options) (manifest.Manifest, string, error) {
-	g, err := newGit(ctx, opt.GitEnv)
+	g, ctx, cancel, err := open(ctx, url, opt)
 	if err != nil {
 		return manifest.Manifest{}, "", err
 	}
+	defer cancel()
 	defer g.close()
 
 	head, err := g.fetch(ctx, url, "HEAD")
@@ -307,20 +357,37 @@ func versions(pattern string, p Plugin, tags map[string]string, pre bool) ([]Ver
 	return out, nil
 }
 
-// git runs git in a scratch bare repository of its own.
+// git runs git in a scratch bare repository of its own, repo under dir, beside an empty home.
 type git struct {
-	dir string
-	env []string
+	dir, repo string
+	env       []string
+	maxBytes  int64
 }
 
-func newGit(ctx context.Context, env []string) (*git, error) {
+func newGit(ctx context.Context, opt Options) (*git, error) {
 	dir, err := os.MkdirTemp("", "plugkit-repository-")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRepository, err)
 	}
 
-	g := &git{dir: dir, env: env}
-	if _, err := g.run(ctx, "init", "-q", "--bare"); err != nil {
+	g := &git{dir: dir, repo: filepath.Join(dir, "repo"), maxBytes: opt.MaxBytes}
+
+	if opt.Untrusted {
+		home := filepath.Join(dir, "home")
+		if err := os.Mkdir(home, 0o700); err != nil {
+			g.close()
+
+			return nil, fmt.Errorf("%w: %w", ErrRepository, err)
+		}
+
+		g.env = gitsafe.Env(os.Environ(), home, opt.Credential)
+	} else {
+		g.env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), opt.GitEnv...)
+	}
+
+	g.env = append(g.env, opt.env...)
+
+	if _, err := g.run(ctx, "init", "-q", "--bare", g.repo); err != nil {
 		g.close()
 
 		return nil, err
@@ -332,24 +399,99 @@ func newGit(ctx context.Context, env []string) (*git, error) {
 func (g *git) close() { _ = os.RemoveAll(g.dir) } //nolint:errcheck // a scratch repository
 
 func (g *git) run(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...) //nolint:gosec // git, reading the repository the caller names
-	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), g.env...)
+	if args[0] != "init" {
+		args = append([]string{"-C", g.repo}, args...)
+	}
 
-	var errOut bytes.Buffer
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	cmd.Stderr = &errOut
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // git, reading the repository the caller names
+	cmd.Env = g.env
 
-	out, err := cmd.Output()
-	if err != nil {
+	var out, errOut bytes.Buffer
+
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("%w: git: %w", ErrRepository, err)
+	}
+
+	over := g.watch(ctx, cancel)
+
+	err := cmd.Wait()
+
+	switch {
+	case over():
+		return nil, fmt.Errorf("%w: git %s: %w of %d bytes", ErrRepository, strings.Join(args, " "), errTooBig, g.maxBytes)
+	case ctx.Err() != nil && err != nil:
+		return nil, fmt.Errorf("%w: git %s: %w", ErrRepository, strings.Join(args, " "), ctx.Err())
+	case err != nil:
 		return nil, fmt.Errorf("%w: git %s: %w: %s", ErrRepository, strings.Join(args, " "), err, strings.TrimSpace(errOut.String()))
 	}
 
-	return out, nil
+	return out.Bytes(), nil
+}
+
+var errTooBig = errors.New("over the size limit")
+
+// watch stops git through cancel once the scratch directory holds more than maxBytes, and says
+// whether it did; with no limit it watches nothing.
+func (g *git) watch(ctx context.Context, cancel context.CancelFunc) func() bool {
+	if g.maxBytes <= 0 {
+		return func() bool { return false }
+	}
+
+	var over atomic.Bool
+
+	go func() {
+		tick := time.NewTicker(50 * time.Millisecond)
+		defer tick.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if sizeOf(g.dir) > g.maxBytes {
+					over.Store(true)
+					cancel()
+
+					return
+				}
+			}
+		}
+	}()
+
+	return func() bool {
+		// a last look, so a fetch that ended between two ticks is measured too
+		if sizeOf(g.dir) > g.maxBytes {
+			over.Store(true)
+		}
+
+		return over.Load()
+	}
+}
+
+func sizeOf(dir string) int64 {
+	var n int64
+
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error { //nolint:errcheck // a file gone mid-walk counts as nothing
+		if err == nil && !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				n += info.Size()
+			}
+		}
+
+		return nil
+	})
+
+	return n
 }
 
 // fetch fetches ref of url, one commit deep, and returns its commit.
 func (g *git) fetch(ctx context.Context, url, ref string) (string, error) {
-	if _, err := g.run(ctx, "fetch", "-q", "--depth", "1", "--no-tags", url, ref); err != nil {
+	if _, err := g.run(ctx, "fetch", "-q", "--depth", "1", "--no-tags", "--", url, ref); err != nil {
 		return "", err
 	}
 
@@ -363,7 +505,7 @@ func (g *git) fetch(ctx context.Context, url, ref string) (string, error) {
 
 // tags are the repository's tags by name, each with its commit.
 func (g *git) tags(ctx context.Context, url string) (map[string]string, error) {
-	out, err := g.run(ctx, "ls-remote", "--tags", url)
+	out, err := g.run(ctx, "ls-remote", "--tags", "--", url)
 	if err != nil {
 		return nil, err
 	}

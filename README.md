@@ -190,6 +190,19 @@ plugins, err := repository.List(ctx, "https://git.example.com/acme/plugins", rep
 m, commit, err := repository.At(ctx, "https://git.example.com/acme/plugins", "step/go-test", "0.2.0")
 ```
 
+A server that runs `List` or `At` on URLs its users give sets
+`Options.Untrusted`, and `store.Store.Untrusted` for pins they give. Then
+only `https://`, `ssh://` and `user@host:path` remotes are fetched; an
+option, a transport helper (`ext::` or any `::`), `file://` and a local
+path are refused, and the URL always follows `--`. git gets none of the
+host's config, credential helpers, `url.insteadOf` or ssh keys
+(`GIT_CONFIG_GLOBAL=/dev/null`, no system config, ssh with no identity,
+agent or config file, https and ssh only), and the caller's
+`Credential`, a token handed to a one-shot helper through the environment,
+never in the URL or an argument, is the only credential. `List` and `At`
+then also stop after `Timeout` and once their fetches write more than
+`MaxBytes`. Unset, git runs with the host's credentials, as a CI job needs.
+
 `kit` is the generic part of a conformance kit: it calls a plugin in work
 directories of its own and holds the checks every kind shares. It fails a
 plugin that answers an unknown call, whose describe names another version
