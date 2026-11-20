@@ -137,9 +137,12 @@ platform, with the repository mounted read-only, `{out}` the only place it
 can write, no network unless the manifest asks for one, and `GOFLAGS=-trimpath`.
 It lays the plugin out as its zip holds it. `build.run` is an argv, or a list of them run in order, each in a container
 of its own with no shell around it; the first that fails ends the build.
-`build.copy: true` runs them in a writable copy of the repository, made in
-Go with `.git` left out and a symlink refused, for a build that writes
-beside its sources, as `npm ci` does. The commands and their environment
+`build.copy: true` runs them in a writable copy of the repository, for a
+build that writes beside its sources, as `npm ci` does. The copy holds the
+files git tracks and nothing else: of a checkout, those its index lists, so
+untracked and ignored files (Bazel's links, `node_modules`, earlier
+outputs) never reach the build; of a pinned commit, its tree. A tracked
+symlink is refused, and so is a directory that is no git checkout. The commands and their environment
 may also name `{commit}`, the full commit built, and `{version}`, the
 version of the tag the build came through (`repository.At`, or a
 `store.Pin` naming its version) without its `v`, or `0.0.0-dev+<the

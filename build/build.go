@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"slices"
@@ -49,6 +50,9 @@ type Options struct {
 	// Commit and Version are what {commit} and {version} stand for: the full commit the build is of,
 	// and the version of the tag it came through, empty when it came through none.
 	Commit, Version string
+	// Tree says Root holds a commit's tree and nothing else, as a store's export of a pinned commit
+	// does; otherwise Root is a git checkout, and build.copy copies the files its index tracks.
+	Tree bool
 }
 
 // Build runs the manifest's command once per platform and lays the plugin out in o.Out.
@@ -91,7 +95,7 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		}
 		defer os.RemoveAll(dir) //nolint:errcheck // the build's own copy
 
-		if err := copyTree(o.Root, dir); err != nil {
+		if err := copySources(ctx, o, dir); err != nil {
 			return m, err
 		}
 
@@ -433,46 +437,92 @@ func copyFile(from, to string) error {
 	return err
 }
 
-var errSymlink = errors.New("is a symlink, which the copy a build writes in doesn't take")
+var (
+	errSymlink    = errors.New("is a symlink, which the copy a build writes in doesn't take")
+	errNoCheckout = errors.New("build.copy copies the files git tracks, and this is no git checkout")
+)
 
-// copyTree copies the repository at from into to for a build to write in: its files and modes,
-// .git left out, and a symlink refused, which could name a file outside the repository.
-func copyTree(from, to string) error {
-	err := filepath.WalkDir(from, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+// copySources copies what a build with build.copy writes in: a commit's whole tree, or of a
+// checkout the files its index tracks, never an untracked or ignored one (Bazel's links,
+// node_modules, earlier outputs), so the build sees the commit and nothing of the machine.
+func copySources(ctx context.Context, o Options, to string) error {
+	files, err := tracked(ctx, o)
+	if err != nil {
+		return err
+	}
 
-		rel, err := filepath.Rel(from, p)
-		if err != nil || rel == "." {
-			return err //nolint:wrapcheck // said below
-		}
+	for _, f := range files {
+		from := filepath.Join(o.Root, filepath.FromSlash(f))
 
-		if d.IsDir() && d.Name() == ".git" {
-			return filepath.SkipDir
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err //nolint:wrapcheck // said below
-		}
+		info, err := os.Lstat(from)
 
 		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// tracked, and deleted in the checkout: the build sees the checkout as it is
+			continue
+		case err != nil:
+			return fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
 		case info.Mode()&fs.ModeSymlink != 0:
-			return fmt.Errorf("%s %w", filepath.ToSlash(rel), errSymlink)
-		case d.IsDir():
-			return os.Mkdir(filepath.Join(to, rel), 0o750)
+			return fmt.Errorf("%w: copy of the repository: %s %w", ErrBuild, f, errSymlink)
 		case !info.Mode().IsRegular():
-			return fmt.Errorf("%s %w", filepath.ToSlash(rel), errNotPlain)
+			return fmt.Errorf("%w: copy of the repository: %s %w", ErrBuild, f, errNotPlain)
 		}
 
-		return copyMode(p, filepath.Join(to, rel), info.Mode().Perm())
-	})
-	if err != nil {
-		return fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
+		dest := filepath.Join(to, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+			return fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
+		}
+
+		if err := copyMode(from, dest, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
+		}
 	}
 
 	return nil
+}
+
+// tracked are the files to copy, slash-separated from Root: every file of a commit's tree, or the
+// files a checkout's index tracks.
+func tracked(ctx context.Context, o Options) ([]string, error) {
+	if o.Tree {
+		var files []string
+
+		err := filepath.WalkDir(o.Root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+
+			rel, err := filepath.Rel(o.Root, p)
+			files = append(files, filepath.ToSlash(rel))
+
+			return err //nolint:wrapcheck // said below
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%w: copy of the repository: %w", ErrBuild, err)
+		}
+
+		return files, nil
+	}
+
+	top, err := exec.CommandContext(ctx, "git", "-C", o.Root, "rev-parse", "--show-toplevel").Output() //nolint:gosec // git, asked about the repository the caller names
+	if err != nil || filepath.Clean(strings.TrimSpace(string(top))) != resolved(o.Root) {
+		return nil, fmt.Errorf("%w: %s: %w", ErrBuild, o.Root, errNoCheckout)
+	}
+
+	out, err := exec.CommandContext(ctx, "git", "-C", o.Root, "ls-files", "-z", "--cached").Output() //nolint:gosec // as above
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: git ls-files: %w", ErrBuild, o.Root, err)
+	}
+
+	return strings.FieldsFunc(string(out), func(r rune) bool { return r == 0 }), nil
+}
+
+func resolved(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return filepath.Clean(r)
+	}
+
+	return filepath.Clean(p)
 }
 
 func copyMode(from, to string, mode fs.FileMode) error {

@@ -325,7 +325,7 @@ func (s Store) build(ctx context.Context, mirror string, p Pin, data []byte, pla
 
 		_, err := build.Build(ctx, build.Options{
 			Tool: s.Tool, Root: src, Dir: p.Path, Manifest: data, Platforms: platforms, Out: tmp, Log: s.Log,
-			Commit: p.Commit, Version: strings.TrimPrefix(p.Version, "v"),
+			Commit: p.Commit, Version: strings.TrimPrefix(p.Version, "v"), Tree: true,
 		})
 
 		return err

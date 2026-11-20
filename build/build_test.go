@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,7 @@ platforms: [any]
 assets: [dist]
 `
 	write(t, root, map[string]string{"manifest.yaml": m, "web/board.js": "x"})
+	checkout(t, root)
 
 	out := filepath.Join(t.TempDir(), "board")
 	if _, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
@@ -242,12 +244,89 @@ assets: [dist]
 		t.Fatalf("a failing command: %v", err)
 	}
 
+	write(t, root, map[string]string{"manifest.yaml": m})
+}
+
+// build.copy copies the files git tracks and nothing else: an untracked or ignored file, Bazel's
+// links and node_modules never reach the build, and a tracked symlink is refused.
+func TestTheCopyHoldsTheTrackedFilesAlone(t *testing.T) {
+	tool := needTool(t, ShImage)
+	root := t.TempDir()
+	m := `name: board
+kind: extension
+build:
+  image: ` + ShImage + `
+  copy: true
+  run: [cp, -R, ., "{out}/dist"]
+platforms: [any]
+assets: [dist]
+`
+	write(t, root, map[string]string{"manifest.yaml": m, "web/board.js": "x"})
+	checkout(t, root)
+
+	// what a checkout gathers that git doesn't track
+	write(t, root, map[string]string{"node_modules/left/index.js": "x", "notes.txt": "mine"})
+
+	if err := os.Symlink("/etc", filepath.Join(root, "bazel-out")); err != nil {
+		t.Fatal(err)
+	}
+
+	out := filepath.Join(t.TempDir(), "board")
+	if _, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+
+	_ = filepath.WalkDir(filepath.Join(out, "dist"), func(p string, d fs.DirEntry, err error) error { //nolint:errcheck // compared below
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(filepath.Join(out, "dist"), p) //nolint:errcheck // under dist
+			got = append(got, filepath.ToSlash(rel))
+		}
+
+		return nil
+	})
+
+	if !slices.Equal(got, []string{"manifest.yaml", "web/board.js"}) {
+		t.Fatalf("the copy held %q", got)
+	}
+
+	// a tracked symlink is refused, by its path
 	if err := os.Symlink("/etc/passwd", filepath.Join(root, "web", "passwd")); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: filepath.Join(t.TempDir(), "board")})
+	git(t, root, "add", "web/passwd")
+
+	_, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: filepath.Join(t.TempDir(), "board")})
 	if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), "web/passwd is a symlink") {
-		t.Fatalf("a symlink in the repository: %v", err)
+		t.Fatalf("a tracked symlink: %v", err)
 	}
+
+	// a directory git doesn't track at all is no checkout to copy
+	plain := t.TempDir()
+	write(t, plain, map[string]string{"manifest.yaml": m})
+
+	_, err = Build(context.Background(), Options{Tool: tool, Root: plain, Manifest: []byte(m), Out: filepath.Join(t.TempDir(), "board")})
+	if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), "no git checkout") {
+		t.Fatalf("no checkout: %v", err)
+	}
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.CommandContext(context.Background(), "git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+// checkout makes root a git checkout with its files committed.
+func checkout(t *testing.T, root string) {
+	t.Helper()
+
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "plugin")
 }
