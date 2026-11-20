@@ -318,3 +318,79 @@ func TestAnUntaggedBuildIsStampedAsADevVersion(t *testing.T) {
 		t.Fatalf("expanded %q", got)
 	}
 }
+
+const included = `name: cache
+kind: service
+platforms: [any]
+include: [service.yaml, conf/]
+`
+
+// A plugin of included paths alone has no build: nothing runs. Beside a build, a plugin of any
+// kind may include paths too, and so may a meta plugin.
+func TestIncludedPathsNeedNoBuild(t *testing.T) {
+	m, err := Parse([]byte(included))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.Builds() || m.Program != "" || !slices.Equal(m.Include, []string{"service.yaml", "conf"}) || !m.Supports("linux/arm64") {
+		t.Fatalf("include alone: %+v", m)
+	}
+
+	m, err = Parse([]byte(good + "include: [conf, docs/README.md]\n"))
+	if err != nil || !m.Builds() || len(m.Include) != 2 {
+		t.Fatalf("include beside a build: %+v %v", m, err)
+	}
+
+	m, err = Parse([]byte(meta + "include: [docs]\n"))
+	if err != nil || m.Builds() || len(m.Include) != 1 {
+		t.Fatalf("include in a meta plugin: %+v %v", m, err)
+	}
+
+	if m, err := Parse([]byte(meta)); err != nil || m.Builds() {
+		t.Fatalf("a meta plugin: %+v %v", m, err)
+	}
+}
+
+func TestIncludedPathsAreRefused(t *testing.T) {
+	cases := map[string]struct{ text, says string }{
+		"an absolute path":          {included + "include: [/etc/passwd]\n", ""},
+		"a path up":                 {strings.Replace(included, "conf/", "../conf", 1), `include: "../conf": a file or directory of the plugin's directory`},
+		"a path up within":          {strings.Replace(included, "conf/", "conf/../../x", 1), `include: "conf/../../x"`},
+		"a root path":               {strings.Replace(included, "conf/", "/etc", 1), `include: "/etc"`},
+		"the directory itself":      {strings.Replace(included, "conf/", ".", 1), `include: "."`},
+		"a dot within":              {strings.Replace(included, "conf/", "conf/./a", 1), `include: "conf/./a"`},
+		"the manifest":              {strings.Replace(included, "conf/", "manifest.yaml", 1), `include: "manifest.yaml": a file or directory`},
+		"a path twice":              {strings.Replace(included, "conf/", "service.yaml", 1), `"service.yaml" and "service.yaml": the same path`},
+		"a path and its parent":     {strings.Replace(included, "conf/", "conf, conf/a.yaml", 1), `"conf" and "conf/a.yaml": the same path, or one within the other`},
+		"a path and its child":      {strings.Replace(included, "conf/", "conf/a.yaml, conf", 1), `"conf/a.yaml" and "conf": the same path, or one within the other`},
+		"a listed file":             {included + "files: [docs/service.yaml]\n", `include: "service.yaml": service.yaml is there too (files: docs/service.yaml)`},
+		"a listed file within":      {included + "files: [conf]\n", `include: "conf/": conf is there too (files: conf)`},
+		"the logo":                  {included + "logo: conf/logo.svg\n", `conf/logo.svg is there too (the logo or a schema)`},
+		"a schema":                  {meta + "include: [schemas]\n", `schemas/put.json is there too (the logo or a schema)`},
+		"an asset directory":        {good + "assets: [web]\ninclude: [web/extra]\n", `include: "web/extra": web is there too (assets: web)`},
+		"a program file":            {good + "include: [go-driver-linux-amd64]\n", "go-driver-linux-amd64 is there too (the program)"},
+		"a program with no build":   {included + "program: cache\n", "build.image"},
+		"assets with no build":      {included + "assets: [dist]\n", "build.image"},
+		"half a build":              {included + "build: {network: true}\n", "build.image"},
+		"a platform with no build":  {strings.Replace(included, "[any]", "[linux/amd64]", 1), "only a plugin built for platforms [any] may have none"},
+		"nothing to deliver":        {"name: cache\nkind: service\nplatforms: [any]\n", "delivers nothing"},
+		"nothing but files":         {"name: cache\nkind: service\nplatforms: [any]\nfiles: [LICENSE]\n", "delivers nothing"},
+		"an include that is a list": {included + "include: [[a]]\n", ""},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			text := c.text
+			if strings.Count(text, "include:") > 1 {
+				// a second include key replaces the fixture's
+				text = strings.Replace(text, "include: [service.yaml, conf/]\n", "", 1)
+			}
+
+			_, err := Parse([]byte(text))
+			if !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want an error saying %q", err, c.says)
+			}
+		})
+	}
+}

@@ -330,3 +330,161 @@ func checkout(t *testing.T, root string) {
 	git(t, root, "add", ".")
 	git(t, root, "commit", "-q", "-m", "plugin")
 }
+
+const includedManifest = `name: cache
+kind: service
+platforms: [any]
+include: [service.yaml, conf/]
+`
+
+// noTool is a container tool that fails if called at all.
+const noTool = "/nonexistent/docker"
+
+// A plugin of included paths alone is laid out with no container: each path as git tracks it, an
+// untracked or ignored file left out, under its path relative to the plugin's directory.
+func TestIncludedPathsAreCopiedWithNoContainer(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"plugins/cache/manifest.yaml":   includedManifest,
+		"plugins/cache/service.yaml":    "image: cache",
+		"plugins/cache/conf/cache.conf": "size 1g",
+		"plugins/cache/conf/tls/ca.pem": "ca",
+		"plugins/cache/notes.txt":       "not included",
+		".gitignore":                    "*.local\n",
+	})
+	checkout(t, root)
+	write(t, root, map[string]string{"plugins/cache/conf/untracked.conf": "mine", "plugins/cache/conf/secret.local": "ignored"})
+
+	out := filepath.Join(t.TempDir(), "cache")
+	if _, err := Build(context.Background(), Options{Tool: noTool, Root: root, Dir: "plugins/cache", Manifest: []byte(includedManifest), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := files(t, out); !slices.Equal(got, []string{"conf/cache.conf", "conf/tls/ca.pem", "manifest.yaml", "service.yaml"}) {
+		t.Fatalf("layout %q", got)
+	}
+
+	// a tracked file holds what the checkout holds
+	write(t, root, map[string]string{"plugins/cache/service.yaml": "image: edited"})
+
+	out = filepath.Join(t.TempDir(), "cache")
+	if _, err := Build(context.Background(), Options{Tool: noTool, Root: root, Dir: "plugins/cache", Manifest: []byte(includedManifest), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, _ := os.ReadFile(filepath.Join(out, "service.yaml")); string(data) != "image: edited" { //nolint:errcheck // compared
+		t.Fatalf("service.yaml holds %q", data)
+	}
+}
+
+func TestIncludedPathsAreRefused(t *testing.T) {
+	cases := map[string]struct {
+		prepare func(t *testing.T, root string)
+		says    string
+	}{
+		"a tracked symlink": {func(t *testing.T, root string) {
+			t.Helper()
+
+			if err := os.Symlink("/etc/passwd", filepath.Join(root, "conf", "passwd")); err != nil {
+				t.Fatal(err)
+			}
+
+			git(t, root, "add", "conf/passwd")
+		}, "conf/passwd is a symlink"},
+		"a directory turned symlink": {func(t *testing.T, root string) {
+			t.Helper()
+
+			outside := t.TempDir()
+			write(t, outside, map[string]string{"cache.conf": "elsewhere"})
+
+			if err := os.RemoveAll(filepath.Join(root, "conf")); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := os.Symlink(outside, filepath.Join(root, "conf")); err != nil {
+				t.Fatal(err)
+			}
+		}, "conf/cache.conf is no plain file of the repository, or a symlink lies on its path"},
+		"an executable": {func(t *testing.T, root string) {
+			t.Helper()
+
+			if err := os.Chmod(filepath.Join(root, "conf", "cache.conf"), 0o755); err != nil { //nolint:gosec // the test's point
+				t.Fatal(err)
+			}
+		}, "conf/cache.conf is executable"},
+		"an untracked path alone": {func(t *testing.T, root string) {
+			t.Helper()
+			git(t, root, "rm", "-q", "--cached", "service.yaml")
+		}, "service.yaml: no file git tracks"},
+		"no checkout": {func(t *testing.T, root string) {
+			t.Helper()
+
+			if err := os.RemoveAll(filepath.Join(root, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}, "no git checkout"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			write(t, root, map[string]string{"manifest.yaml": includedManifest, "service.yaml": "s", "conf/cache.conf": "c"})
+			checkout(t, root)
+			c.prepare(t, root)
+
+			_, err := Build(context.Background(), Options{Tool: noTool, Root: root, Manifest: []byte(includedManifest), Out: filepath.Join(t.TempDir(), "cache")})
+			if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", err, c.says)
+			}
+		})
+	}
+}
+
+// Beside a build, the build runs first and the included paths are copied after it.
+func TestIncludedPathsComeAfterTheBuild(t *testing.T) {
+	tool := needTool(t, ShImage)
+	root := t.TempDir()
+	m := `name: board
+kind: extension
+build:
+  image: ` + ShImage + `
+  run: [cp, -R, web, "{out}/dist"]
+platforms: [any]
+assets: [dist]
+include: [conf]
+`
+	write(t, root, map[string]string{"manifest.yaml": m, "web/board.js": "x", "conf/board.yaml": "y"})
+	checkout(t, root)
+
+	out := filepath.Join(t.TempDir(), "board")
+	if _, err := Build(context.Background(), Options{Tool: tool, Root: root, Manifest: []byte(m), Out: out}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := files(t, out); !slices.Equal(got, []string{"conf/board.yaml", "dist/board.js", "manifest.yaml"}) {
+		t.Fatalf("layout %q", got)
+	}
+}
+
+// files are the files under dir, slash-separated and sorted.
+func files(t *testing.T, dir string) []string {
+	t.Helper()
+
+	var got []string
+
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(dir, p) //nolint:errcheck // under dir
+			got = append(got, filepath.ToSlash(rel))
+		}
+
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slices.Sort(got)
+
+	return got
+}

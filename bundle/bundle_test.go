@@ -225,3 +225,95 @@ func TestUnpackRefusesUnsafeZips(t *testing.T) {
 		})
 	}
 }
+
+const includedManifest = `name: cache
+kind: service
+platforms: [any]
+include: [service.yaml, conf/]
+`
+
+var includedPlugin = []entry{
+	{"manifest.yaml", 0o644, includedManifest},
+	{"service.yaml", 0o644, "image: cache"},
+	{"conf/cache.conf", 0o644, "size 1g"},
+	{"conf/tls/ca.pem", 0o644, "ca"},
+}
+
+// Included paths are packed under their own paths beside the manifest and unpack as they were.
+func TestIncludedPathsPackAndUnpack(t *testing.T) {
+	data := packed(t, layout(t, includedPlugin...))
+
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+
+	if want := []string{"conf/cache.conf", "conf/tls/ca.pem", "manifest.yaml", "service.yaml"}; !slices.Equal(names, want) {
+		t.Fatalf("entries %q, want %q", names, want)
+	}
+
+	dest := filepath.Join(t.TempDir(), "plugin")
+	if _, err := Unpack(writeZip(t, data), dest, Limits{}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range includedPlugin {
+		if got, err := os.ReadFile(filepath.Join(dest, filepath.FromSlash(e.name))); err != nil || string(got) != e.body {
+			t.Fatalf("%s: %q %v", e.name, got, err)
+		}
+	}
+
+	// a zip with directory entries for the included paths unpacks too
+	withDirs := rawZip(t, raw{"manifest.yaml", 0o644, includedManifest}, raw{"conf/", fs.ModeDir | 0o755, ""},
+		raw{"conf/a", 0o644, "a"}, raw{"service.yaml", 0o644, "s"})
+	if _, err := Unpack(withDirs, filepath.Join(t.TempDir(), "plugin"), Limits{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPackRefusesAnIncludedPathItLacks(t *testing.T) {
+	var b bytes.Buffer
+
+	err := Pack(layout(t, includedPlugin[:2]...), &b)
+	if !errors.Is(err, ErrBundle) || !strings.Contains(err.Error(), "no file of included path conf") {
+		t.Fatal(err)
+	}
+
+	err = Pack(layout(t, append(slices.Clone(includedPlugin), entry{"conf/run.sh", 0o755, "x"})...), &b)
+	if !errors.Is(err, ErrBundle) || !strings.Contains(err.Error(), "conf/run.sh is executable") {
+		t.Fatal(err)
+	}
+}
+
+func TestUnpackChecksIncludedPaths(t *testing.T) {
+	base := []raw{{"manifest.yaml", 0o644, includedManifest}, {"service.yaml", 0o644, "s"}}
+	full := append(slices.Clone(base), raw{"conf/a", 0o644, "a"})
+
+	cases := map[string]struct {
+		entries []raw
+		limits  Limits
+		says    string
+	}{
+		"a missing include":      {base, Limits{}, "the manifest includes conf, and the zip holds no file of it"},
+		"only its directory":     {append(slices.Clone(base), raw{"conf/", fs.ModeDir | 0o755, ""}), Limits{}, "includes conf"},
+		"a path up":              {append(slices.Clone(full), raw{"conf/../../x", 0o644, "x"}), Limits{}, "leaves the plugin's directory"},
+		"a symlink":              {append(slices.Clone(full), raw{"conf/link", fs.ModeSymlink | 0o777, "/etc/passwd"}), Limits{}, "is a symlink"},
+		"an executable":          {append(slices.Clone(full), raw{"conf/run", 0o755, "x"}), Limits{}, "only the program may be"},
+		"an oversized file":      {append(slices.Clone(full), raw{"conf/big", 0o644, strings.Repeat("x", 4096)}), Limits{Bytes: 1024}, "more than 1024 bytes"},
+		"a path beside the list": {append(slices.Clone(full), raw{"confs/a", 0o644, "x"}), Limits{}, "no part of plugin cache"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Unpack(rawZip(t, c.entries...), filepath.Join(t.TempDir(), "plugin"), c.limits)
+			if !errors.Is(err, ErrBundle) || !strings.Contains(err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", err, c.says)
+			}
+		})
+	}
+}

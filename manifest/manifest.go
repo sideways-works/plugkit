@@ -1,6 +1,7 @@
 // Package manifest reads manifest.yaml, the file in a plugin's directory that names the plugin and
 // says how to build it: the image the build runs in, its command, the platforms it is built for,
-// and the files and asset directories that go with the program.
+// the files and asset directories that go with the program, and the paths of the plugin's
+// directory it includes as they are.
 package manifest
 
 import (
@@ -34,7 +35,8 @@ type Manifest struct {
 	Name string `yaml:"name"`
 	Kind string `yaml:"kind"`
 	// Program is the executable the build writes into {out}: <program>, or <program>.mjs for a
-	// Node plugin. It may be left out only with platforms [any], for a plugin of assets alone.
+	// Node plugin. It may be left out only with platforms [any], for a plugin of assets or included
+	// paths alone.
 	Program string `yaml:"program"`
 	// Runtime is what runs the program besides the machine itself, with an optional semver range:
 	// node for a <program>.mjs, "node >=22 <27". Empty means a native binary.
@@ -45,6 +47,10 @@ type Manifest struct {
 	Files []string `yaml:"files"`
 	// Assets are directories the build writes under {out}, kept under the same relative paths.
 	Assets []string `yaml:"assets"`
+	// Include are files and directories of the plugin's directory, copied as git tracks them under
+	// the same relative paths, after the build if there is one. A plugin with no program may have
+	// no build at all: then nothing runs.
+	Include []string `yaml:"include"`
 	// Description and Logo (a file of the plugin's directory) are for listings.
 	Description string `yaml:"description"`
 	Logo        string `yaml:"logo"`
@@ -166,6 +172,10 @@ func Parse(data []byte) (Manifest, error) {
 		m.Assets[i] = strings.TrimSuffix(a, "/")
 	}
 
+	for i, inc := range m.Include {
+		m.Include[i] = strings.TrimSuffix(inc, "/")
+	}
+
 	return m, nil
 }
 
@@ -185,6 +195,7 @@ func (m Manifest) check() []string {
 	m.checkListing(add)
 	m.checkPermissions(add)
 	m.checkRuntime(add)
+	m.checkInclude(add)
 
 	if m.Kind == KindMeta {
 		m.checkMeta(add)
@@ -200,17 +211,80 @@ func (m Manifest) check() []string {
 
 	switch {
 	case m.Program == "" && !m.AnyPlatform():
-		add("program is missing; only a plugin built for platforms [any] may have none, holding assets alone")
-	case m.Program == "" && len(m.Assets) == 0:
-		add("a plugin with no program needs assets")
+		add("program is missing; only a plugin built for platforms [any] may have none, holding assets or included paths alone")
+	case m.Program == "" && len(m.Assets) == 0 && len(m.Include) == 0:
+		add("a plugin with no program delivers nothing: it needs assets its build writes, or include")
 	case m.Program != "" && (!program.MatchString(m.Program) || strings.HasSuffix(m.Program, ".mjs")):
 		add("program %q: a file name, without .mjs: the build writes <program> or <program>.mjs", m.Program)
 	}
 
-	m.Build.check(m.AnyPlatform(), add)
+	// a plugin of included paths alone has no build; a program or assets need one
+	if m.Program != "" || len(m.Assets) > 0 || len(m.Include) == 0 || m.Build.set() {
+		m.Build.check(m.AnyPlatform(), add)
+	}
+
 	m.checkLayout(add)
 
 	return bad
+}
+
+// Builds tells whether the plugin has a build to run; one of kind meta or of included paths alone
+// has none, and needs no container.
+func (m Manifest) Builds() bool { return m.Kind != KindMeta && m.Build.set() }
+
+// set tells whether the manifest has a build key at all.
+func (b Build) set() bool {
+	return b.Image != "" || len(b.Run) > 0 || len(b.Env) > 0 || b.Network || b.Copy
+}
+
+// checkInclude checks the included paths: each relative to the plugin's directory, and none at
+// or within another's, or at or within a path the zip holds otherwise.
+func (m Manifest) checkInclude(add func(string, ...any)) {
+	taken := map[string]string{FileName: "the manifest"}
+
+	for _, f := range m.Files {
+		taken[FileBase(f)] = "files: " + f
+	}
+
+	for _, a := range m.Assets {
+		taken[strings.TrimSuffix(a, "/")] = "assets: " + a
+	}
+
+	for _, e := range m.Extras() {
+		taken[e] = "the logo or a schema"
+	}
+
+	for _, p := range m.ProgramFiles() {
+		taken[p] = "the program"
+	}
+
+	var seen []string
+
+	for _, raw := range m.Include {
+		inc := strings.TrimSuffix(raw, "/")
+		if !localPath(inc) {
+			add("include: %q: a file or directory of the plugin's directory, relative, without .. or .", raw)
+
+			continue
+		}
+
+		if i := slices.IndexFunc(seen, func(s string) bool { return overlaps(s, inc) }); i >= 0 {
+			add("include: %q and %q: the same path, or one within the other; list it once", seen[i], raw)
+		}
+
+		for _, at := range slices.Sorted(maps.Keys(taken)) {
+			if overlaps(at, inc) {
+				add("include: %q: %s is there too (%s); a path comes from one place", raw, at, taken[at])
+			}
+		}
+
+		seen = append(seen, inc)
+	}
+}
+
+// overlaps tells whether a and b are the same path or one lies within the other.
+func overlaps(a, b string) bool {
+	return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
 // checkLayout checks the files and assets the zip holds beside the program.

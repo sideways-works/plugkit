@@ -783,3 +783,112 @@ func random(t *testing.T, n int) string {
 
 	return hex.EncodeToString(b)
 }
+
+const includedManifest = `name: cache
+kind: service
+platforms: [any]
+include: [service.yaml, conf/]
+`
+
+// A plugin of included paths alone resolves from a commit and from its zip with no container: the
+// store's tool fails if called. Two commits that differ only in an included file are two entries.
+func TestAnIncludedPluginResolvesWithNoContainer(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"services/cache/manifest.yaml":   includedManifest,
+		"services/cache/service.yaml":    "image: cache",
+		"services/cache/conf/cache.conf": "size 1g",
+		"services/cache/README.md":       "not included",
+	})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "cache")
+	first := git(t, root, "rev-parse", "HEAD")
+
+	write(t, root, map[string]string{"services/cache/conf/cache.conf": "size 2g"})
+	git(t, root, "commit", "-q", "-am", "bigger")
+	second := git(t, root, "rev-parse", "HEAD")
+
+	var builds atomic.Int32
+
+	s := Store{Dir: t.TempDir(), Tool: "/nonexistent/docker", OnBuild: func(string) { builds.Add(1) }}
+
+	read := func(r Resolved, f string) string {
+		t.Helper()
+
+		data, err := os.ReadFile(filepath.Join(r.Dir, filepath.FromSlash(f)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return string(data)
+	}
+
+	a, err := s.Resolve(context.Background(), Pin{Repository: root, Path: "services/cache", Commit: first}, "linux/amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := s.Resolve(context.Background(), Pin{Repository: root, Path: "services/cache", Commit: second}, "darwin/arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if a.Program != "" || a.Dir == b.Dir || read(a, "conf/cache.conf") != "size 1g" || read(b, "conf/cache.conf") != "size 2g" || read(a, "service.yaml") != "image: cache" {
+		t.Fatalf("resolved %+v and %+v", a, b)
+	}
+
+	if _, err := os.Stat(filepath.Join(a.Dir, "README.md")); err == nil {
+		t.Fatal("a path the manifest doesn't include was copied")
+	}
+
+	if again, err := s.Resolve(context.Background(), Pin{Repository: root, Path: "services/cache", Commit: first}, "linux/arm64"); err != nil || again.Dir != a.Dir || builds.Load() != 2 {
+		t.Fatalf("again: %+v %v, %d builds", again, err, builds.Load())
+	}
+
+	var z bytes.Buffer
+	if err := bundle.Pack(a.Dir, &z); err != nil {
+		t.Fatal(err)
+	}
+
+	lacking := zipOf(t, raw{"manifest.yaml", 0o644, includedManifest}, raw{"service.yaml", 0o644, "image: cache"})
+	srv, _ := serve(t, map[string][]byte{"/cache.zip": z.Bytes(), "/lacking.zip": lacking})
+	s = Store{Dir: t.TempDir(), Tool: "/nonexistent/docker", Client: srv.Client()}
+
+	r, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/cache.zip", SHA256: sum(z.Bytes())}}, "linux/amd64")
+	if err != nil || r.Program != "" || read(r, "conf/cache.conf") != "size 1g" {
+		t.Fatalf("by zip: %+v %v", r, err)
+	}
+
+	if _, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/lacking.zip", SHA256: sum(lacking)}}, "linux/amd64"); err == nil || !strings.Contains(err.Error(), "includes conf") {
+		t.Fatal(err)
+	}
+}
+
+// A symlink a commit holds in an included directory is refused, by its path, and nothing is kept.
+func TestAnIncludedSymlinkOfACommitIsRefused(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, map[string]string{"manifest.yaml": includedManifest, "service.yaml": "s", "conf/cache.conf": "c"})
+
+	if err := os.Symlink("/etc/passwd", filepath.Join(root, "conf", "passwd")); err != nil {
+		t.Fatal(err)
+	}
+
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "cache")
+
+	cache := t.TempDir()
+
+	_, err := Store{Dir: cache, Tool: "/nonexistent/docker"}.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, "linux/amd64")
+	if !errors.Is(err, build.ErrBuild) || !strings.Contains(err.Error(), "conf/passwd is a symlink") {
+		t.Fatal(err)
+	}
+
+	ents, _ := os.ReadDir(cache) //nolint:errcheck // compared
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), ".") {
+			t.Fatalf("the cache kept %s", e.Name())
+		}
+	}
+}

@@ -1,6 +1,6 @@
 // Package store resolves a plugin pinned by commit or by zip to a directory of the cache holding
-// it as its zip does: manifest.yaml, the program and the assets. A commit is built from its
-// manifest once per platform, a zip downloaded and checked once; the same key never builds or
+// it as its zip does: manifest.yaml, the program, the assets and the included paths. A commit is
+// built from its manifest once per platform, a zip downloaded and checked once; the same key never builds or
 // downloads twice, and every entry appears whole, by a rename. Besides the entries, named by their
 // 64-hex keys, the store keeps only names that start with a dot, so a host may give each plugin a
 // directory of its name beside them as long as no plugin's name starts with one.

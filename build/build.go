@@ -1,6 +1,7 @@
 // Package build builds a plugin from its manifest in a container, the way its zip and the cache
-// hold it: manifest.yaml byte for byte, the program for each platform, the manifest's files and its
-// assets, all at the top level of one directory.
+// hold it: manifest.yaml byte for byte, the program for each platform, the manifest's files, its
+// assets and its included paths, all in one directory. A plugin with no build, of kind meta or of
+// included paths alone, is laid out with no container.
 package build
 
 import (
@@ -51,7 +52,8 @@ type Options struct {
 	// and the version of the tag it came through, empty when it came through none.
 	Commit, Version string
 	// Tree says Root holds a commit's tree and nothing else, as a store's export of a pinned commit
-	// does; otherwise Root is a git checkout, and build.copy copies the files its index tracks.
+	// does; otherwise Root is a git checkout, and build.copy and include copy the files its index
+	// tracks.
 	Tree bool
 }
 
@@ -73,8 +75,8 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 
 	b := builder{o: o, m: m}
 
-	// a meta plugin is its manifest and files alone: nothing runs
-	if m.Kind != manifest.KindMeta {
+	// a plugin with no build, of kind meta or of included paths alone, runs nothing
+	if m.Builds() {
 		if b.tool, err = container.Find(o.Tool); err != nil {
 			return m, fmt.Errorf("%w: %w", ErrBuild, err)
 		}
@@ -88,7 +90,7 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		return m, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
-	if m.Build.Copy && m.Kind != manifest.KindMeta {
+	if m.Build.Copy && m.Builds() {
 		dir, err := os.MkdirTemp(filepath.Dir(o.Out), ".src-")
 		if err != nil {
 			return m, fmt.Errorf("%w: %w", ErrBuild, err)
@@ -103,7 +105,7 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 	}
 
 	for i, p := range platforms {
-		if m.Kind == manifest.KindMeta {
+		if !m.Builds() {
 			break
 		}
 
@@ -118,7 +120,7 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		}
 	}
 
-	if err := b.files(); err != nil {
+	if err := b.copies(ctx); err != nil {
 		return m, err
 	}
 
@@ -354,6 +356,16 @@ func copyAssets(from, to, name string) error {
 	return nil
 }
 
+// copies lays out what the plugin's directory gives the layout: the included paths, after the build
+// and refusing a path it wrote, then the manifest's files and extras.
+func (b builder) copies(ctx context.Context) error {
+	if err := b.include(ctx); err != nil {
+		return err
+	}
+
+	return b.files()
+}
+
 // files copies the manifest's files from the plugin's directory; a symlink is refused, since it
 // could name a file of the machine outside the repository.
 func (b builder) files() error {
@@ -439,8 +451,95 @@ func copyFile(from, to string) error {
 
 var (
 	errSymlink    = errors.New("is a symlink, which the copy a build writes in doesn't take")
-	errNoCheckout = errors.New("build.copy copies the files git tracks, and this is no git checkout")
+	errNoCheckout = errors.New("build.copy and include copy the files git tracks, and this is no git checkout")
 )
+
+// include copies the manifest's included paths from the plugin's directory, as git tracks them:
+// each file under its path relative to the plugin's directory. A symlink, anywhere on the path, or
+// an executable file is refused, and so is a path the build wrote or one with no tracked file.
+func (b builder) include(ctx context.Context) error {
+	if len(b.m.Include) == 0 {
+		return nil
+	}
+
+	files, err := tracked(ctx, b.o)
+	if err != nil {
+		return err
+	}
+
+	dir := path.Clean(b.o.Dir)
+	if b.o.Dir == "" {
+		dir = "."
+	}
+
+	for _, inc := range b.m.Include {
+		at := path.Join(dir, inc)
+		n := 0
+
+		for _, f := range files {
+			if f != at && !strings.HasPrefix(f, at+"/") {
+				continue
+			}
+
+			rel := inc + strings.TrimPrefix(f, at)
+
+			copied, err := b.includeFile(f, rel)
+			if err != nil {
+				return fmt.Errorf("%w: include: %w", ErrBuild, err)
+			}
+
+			if copied {
+				n++
+			}
+		}
+
+		if n == 0 {
+			return fmt.Errorf("%w: include: %s: no file git tracks in the plugin's directory", ErrBuild, inc)
+		}
+	}
+
+	return nil
+}
+
+var (
+	errTwice   = errors.New("is there already: the build wrote it, and an included path doesn't replace it")
+	errLink    = errors.New("is a symlink")
+	errOutside = errors.New("is no plain file of the repository, or a symlink lies on its path")
+)
+
+// includeFile copies f, a file of the repository, to rel in the layout; it says false for a
+// tracked file the checkout no longer holds.
+func (b builder) includeFile(f, rel string) (bool, error) {
+	src := filepath.Join(b.o.Root, filepath.FromSlash(f))
+
+	info, err := os.Lstat(src)
+
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// tracked, and deleted in the checkout: the checkout as it is
+		return false, nil
+	case err != nil:
+		return false, err //nolint:wrapcheck // the caller says whose
+	case info.Mode()&fs.ModeSymlink != 0:
+		return false, fmt.Errorf("%s %w", rel, errLink)
+	case !info.Mode().IsRegular() || !inside(b.o.Root, src) || resolved(src) != filepath.Join(resolved(b.o.Root), filepath.FromSlash(f)):
+		// a directory on the way that is a link would lead out of the repository
+		return false, fmt.Errorf("%s %w", rel, errOutside)
+	case info.Mode()&0o111 != 0:
+		return false, fmt.Errorf("%s %w", rel, errExecutable)
+	}
+
+	to := filepath.Join(b.o.Out, filepath.FromSlash(rel))
+	if _, err := os.Lstat(to); err == nil {
+		return false, fmt.Errorf("%s %w", rel, errTwice)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+		return false, err //nolint:wrapcheck // the caller says whose
+	}
+
+	return true, copyFile(src, to)
+}
 
 // copySources copies what a build with build.copy writes in: a commit's whole tree, or of a
 // checkout the files its index tracks, never an untracked or ignored one (Bazel's links,

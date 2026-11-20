@@ -1,7 +1,8 @@
 // Package bundle packs a built plugin into a zip and unpacks one safely. A plugin's zip holds, at
 // its top level and with no directory around them, manifest.yaml, the program's files
-// (<program>-<os>-<arch> for each platform, or <program>.mjs), the manifest's files, and its asset
-// directories. Nothing else is accepted, and only the program may be executable.
+// (<program>-<os>-<arch> for each platform, or <program>.mjs), the manifest's files, its asset
+// directories, and its included paths under their own. Nothing else is accepted, and only the
+// program may be executable.
 package bundle
 
 import (
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -43,6 +45,8 @@ const (
 	AssetDir
 	// Extra is the logo, or a meta plugin's schema file, under its own path.
 	Extra
+	// Included is a file of an included path, under its own path.
+	Included
 )
 
 // RoleOf says what name (slash-separated, relative to the zip's top) is for the plugin m.
@@ -76,7 +80,30 @@ func RoleOf(m manifest.Manifest, name string) Role {
 		}
 	}
 
+	for _, inc := range m.Include {
+		switch {
+		case name == inc || strings.HasPrefix(name, inc+"/"):
+			return Included
+		case strings.HasPrefix(inc, name+"/"):
+			return AssetDir
+		}
+	}
+
 	return Outside
+}
+
+// holds is the parts of a plugin a zip may hold, for the messages that refuse an entry.
+const holds = "a zip holds " + manifest.FileName + ", the program's files, the manifest's files, its assets and its included paths"
+
+// missingInclude is the first of the manifest's included paths with no file among names.
+func missingInclude(m manifest.Manifest, names []string) string {
+	for _, inc := range m.Include {
+		if !slices.ContainsFunc(names, func(n string) bool { return n == inc || strings.HasPrefix(n, inc+"/") }) {
+			return inc
+		}
+	}
+
+	return ""
 }
 
 // fixedTime is every entry's time, so the same build packs to the same bytes.
@@ -114,10 +141,10 @@ func Pack(dir string, w io.Writer) error {
 		switch {
 		case info.Mode()&fs.ModeSymlink != 0:
 			return fmt.Errorf("%w: %s is a symlink", ErrBundle, rel)
-		case d.IsDir() && (role == AssetDir || role == Asset):
+		case d.IsDir() && (role == AssetDir || role == Asset || role == Included):
 			return nil
 		case d.IsDir() || !info.Mode().IsRegular() || role == Outside || role == AssetDir:
-			return fmt.Errorf("%w: %s is no part of plugin %s: a zip holds %s, the program's files, the manifest's files and its assets", ErrBundle, rel, m.Name, manifest.FileName)
+			return fmt.Errorf("%w: %s is no part of plugin %s: %s", ErrBundle, rel, m.Name, holds)
 		case role != Program && info.Mode()&0o111 != 0:
 			return fmt.Errorf("%w: %s is executable, and only the program may be", ErrBundle, rel)
 		}
@@ -132,6 +159,10 @@ func Pack(dir string, w io.Writer) error {
 
 	if m.Program != "" && !slices.ContainsFunc(names, func(n string) bool { return RoleOf(m, n) == Program }) {
 		return fmt.Errorf("%w: pack %s: no file of program %s (%s)", ErrBundle, dir, m.Program, strings.Join(m.ProgramFiles(), ", "))
+	}
+
+	if inc := missingInclude(m, names); inc != "" {
+		return fmt.Errorf("%w: pack %s: no file of included path %s", ErrBundle, dir, inc)
 	}
 
 	if err := manifest.CheckSchemas(m, readIn(dir)); err != nil {
@@ -258,6 +289,10 @@ func Unpack(file, dest string, limits Limits) (manifest.Manifest, error) {
 		return manifest.Manifest{}, fmt.Errorf("%w: no file of program %s (%s)", ErrBundle, m.Program, strings.Join(m.ProgramFiles(), ", "))
 	}
 
+	if inc := missingInclude(m, slices.Collect(maps.Keys(seen))); inc != "" {
+		return manifest.Manifest{}, fmt.Errorf("%w: the manifest includes %s, and the zip holds no file of it", ErrBundle, inc)
+	}
+
 	if err := manifest.CheckSchemas(m, readIn(dest)); err != nil {
 		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBundle, err)
 	}
@@ -277,10 +312,10 @@ func checkEntry(m manifest.Manifest, f *zip.File, seen map[string]bool) (Role, e
 		return 0, fmt.Errorf("%w: entry %q is there twice", ErrBundle, f.Name)
 	case mode&fs.ModeSymlink != 0:
 		return 0, fmt.Errorf("%w: entry %q is a symlink", ErrBundle, f.Name)
-	case mode.IsDir() && (role == AssetDir || role == Asset):
+	case mode.IsDir() && (role == AssetDir || role == Asset || role == Included):
 		return AssetDir, nil
 	case mode.IsDir() || !mode.IsRegular() || role == Outside || role == AssetDir:
-		return 0, fmt.Errorf("%w: entry %q is no part of plugin %s: a zip holds %s, the program's files, the manifest's files and its assets", ErrBundle, f.Name, m.Name, manifest.FileName)
+		return 0, fmt.Errorf("%w: entry %q is no part of plugin %s: %s", ErrBundle, f.Name, m.Name, holds)
 	case role != Program && mode&0o111 != 0:
 		return 0, fmt.Errorf("%w: entry %q is executable, and only the program may be", ErrBundle, f.Name)
 	}

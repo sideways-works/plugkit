@@ -183,6 +183,25 @@ an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
 message. It resolves to its directory as a plugin built for `[any]` does,
 and nothing of it is built.
 
+A manifest may `include` files and directories of the plugin's directory,
+`include: [service.yaml, conf/]`. They are copied as they are into the
+resolved plugin, under their paths relative to the plugin's directory, and
+packed at those paths in its zip beside `manifest.yaml`. Each path is
+relative, without `..` or `.`, and none may be another's, lie within one, or
+meet a path the plugin holds otherwise (its `files`, `assets`, `logo`,
+schemas or program). The files come from what git tracks: a pinned commit's
+tree, or of a checkout the files its index lists, each as the checkout
+holds it, so untracked and ignored files never get in. A symlink anywhere
+on a path, an executable file, and an included path with no tracked file
+are refused, each by its path. A plugin with no program may include paths
+with no `build` at all: nothing runs and no image is pulled, so it resolves
+without docker or podman. Beside a build, the build runs first and the
+included paths are copied after it. A plugin with no program, no assets and
+no included path delivers nothing and is refused; a `meta` plugin still
+needs neither. A zip whose manifest includes a path it holds no file of is
+refused. The cache keeps an included plugin of a commit under the commit,
+like any build.
+
 A manifest's optional `runtime` says what runs the program besides the
 machine, with an optional semver range: `node` or `"node >=22 <27"` for a
 `.mjs` program. Without one the program is a native binary, so a host
