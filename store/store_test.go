@@ -545,3 +545,63 @@ func TestAMetaPluginResolvesToItsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A build's {commit} and {version} stamp the program, here through -ldflags -X as a Go release does,
+// and a build of the commit with a version is kept apart from one without.
+func TestABuildIsStampedWithItsCommitAndVersion(t *testing.T) {
+	tool := needTool(t, goImage)
+
+	root := t.TempDir()
+	write(t, root, map[string]string{
+		"go.mod":  "module example.com/hello\n\ngo 1.25\n",
+		"main.go": "package main\n\nimport \"fmt\"\n\nvar version = \"dev\"\n\nfunc main() { fmt.Println(version) }\n",
+		"manifest.yaml": `name: hello
+kind: driver
+program: hello
+build:
+  image: ` + goImage + `
+  run: [go, build, "-ldflags=-X main.version={version}+{commit}", -o, "{out}/hello", .]
+  env: {CGO_ENABLED: "0", GOOS: "{os}", GOARCH: "{arch}", GOTOOLCHAIN: local}
+platforms: [` + host + `]
+`,
+	})
+	git(t, root, "init", "-q")
+	git(t, root, "add", ".")
+	git(t, root, "commit", "-q", "-m", "plugin")
+
+	commit := git(t, root, "rev-parse", "HEAD")
+
+	var builds atomic.Int32
+
+	s := Store{Dir: t.TempDir(), Tool: tool, OnBuild: func(string) { builds.Add(1) }}
+
+	says := func(version string) string {
+		t.Helper()
+
+		r, err := s.Resolve(context.Background(), Pin{Repository: root, Commit: commit, Version: version}, host)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		out, err := exec.CommandContext(context.Background(), r.Program).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return strings.TrimSpace(string(out))
+	}
+
+	if got := says(""); got != "+"+commit {
+		t.Fatalf("without a version: %q", got)
+	}
+
+	for range 2 {
+		if got := says("v1.2.3"); got != "1.2.3+"+commit {
+			t.Fatalf("version 1.2.3: %q", got)
+		}
+	}
+
+	if n := builds.Load(); n != 2 {
+		t.Fatalf("%d builds, want one without a version and one with", n)
+	}
+}

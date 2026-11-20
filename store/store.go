@@ -45,7 +45,10 @@ var (
 type Pin struct {
 	// Repository is a URL git fetches from; Path the plugin's directory in it.
 	Repository, Path, Commit string
-	Zip                      *Zip
+	// Version is the version of the tag the commit was found through (repository.At), without a
+	// leading v: a build's {version}. Empty when the pin names the commit alone.
+	Version string
+	Zip     *Zip
 }
 
 type Zip struct {
@@ -194,7 +197,7 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		return Resolved{}, fmt.Errorf("%w: commit %q: 40 hex digits", ErrPin, p.Commit)
 	}
 
-	alias := filepath.Join(s.Dir, aliasesDir, hexSum("source\x00"+p.Repository+"\x00"+p.Commit+"\x00"+p.Path+"\x00"+osArch))
+	alias := filepath.Join(s.Dir, aliasesDir, hexSum("source\x00"+p.Repository+"\x00"+p.Commit+"\x00"+p.Path+"\x00"+osArch+versioned(p.Version)))
 	if key, err := os.ReadFile(alias); err == nil && sha256Hex.Match(key) { //nolint:gosec // the cache's own file
 		if r, err := s.found(filepath.Join(s.Dir, string(key)), osArch); err == nil {
 			return r, nil
@@ -226,6 +229,11 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 	}
 
 	key := SourceKey(p.Repository, p.Commit, p.Path, manifest.Digest(data), platform, m.ImageDigest())
+	if p.Version != "" {
+		// a build stamped with a version is another build of the same commit
+		key = hexSum(key + versioned(p.Version))
+	}
+
 	entry := filepath.Join(s.Dir, key)
 
 	if _, err := s.found(entry, osArch); errors.Is(err, os.ErrNotExist) {
@@ -273,7 +281,10 @@ func (s Store) build(ctx context.Context, mirror string, p Pin, data []byte, pla
 			platforms = []string{platform}
 		}
 
-		_, err := build.Build(ctx, build.Options{Tool: s.Tool, Root: src, Dir: p.Path, Manifest: data, Platforms: platforms, Out: tmp, Log: s.Log})
+		_, err := build.Build(ctx, build.Options{
+			Tool: s.Tool, Root: src, Dir: p.Path, Manifest: data, Platforms: platforms, Out: tmp, Log: s.Log,
+			Commit: p.Commit, Version: strings.TrimPrefix(p.Version, "v"),
+		})
 
 		return err
 	})
@@ -518,6 +529,16 @@ func exists(p string) bool {
 	_, err := os.Stat(p) //nolint:gosec // an entry of the cache by its key
 
 	return err == nil
+}
+
+// versioned is what a version adds to a build's keys; nothing without one, so an unversioned build
+// keeps the key it always had.
+func versioned(version string) string {
+	if version == "" {
+		return ""
+	}
+
+	return "\x00version\x00" + strings.TrimPrefix(version, "v")
 }
 
 func hexSum(s string) string {

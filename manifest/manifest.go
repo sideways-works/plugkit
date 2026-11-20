@@ -83,7 +83,7 @@ var (
 	holder    = regexp.MustCompile(`\{[^{}]*\}`)
 	relPath   = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
 	reserved  = []string{FileName}
-	knownHold = []string{"{out}", "{os}", "{arch}"}
+	knownHold = []string{"{out}", "{os}", "{arch}", "{commit}", "{version}"}
 )
 
 // Parse reads a manifest and refuses unknown keys, an image without a digest, and placeholders
@@ -274,8 +274,8 @@ func (b Build) check(anyPlatform bool, add func(string, ...any)) {
 		for _, h := range holder.FindAllString(s, -1) {
 			switch {
 			case !slices.Contains(knownHold, h):
-				add("build: %s is no placeholder: {out}, {os} and {arch} are", h)
-			case anyPlatform && h != "{out}":
+				add("build: %s is no placeholder: {out}, {os}, {arch}, {commit} and {version} are", h)
+			case anyPlatform && (h == "{os}" || h == "{arch}"):
 				add("build: %s has no value for platforms [any]", h)
 			}
 		}
@@ -369,10 +369,19 @@ func (m Manifest) ImageDigest() string {
 }
 
 // Expand fills the placeholders of s; with platforms [any], os and arch are empty and unused.
-func Expand(s, out, osArch string) string {
-	goos, arch, _ := strings.Cut(osArch, "/")
+func Expand(s, out, osArch string) string { return Values{Out: out, Platform: osArch}.Expand(s) }
 
-	return strings.NewReplacer("{out}", out, "{os}", goos, "{arch}", arch).Replace(s)
+// Values are what a build's placeholders stand for: {out}; {os} and {arch} of Platform (os/arch);
+// {commit}, the full commit being built; and {version}, the version of the tag the build came
+// through, without a leading v, empty when it came through none.
+type Values struct {
+	Out, Platform, Commit, Version string
+}
+
+func (v Values) Expand(s string) string {
+	goos, arch, _ := strings.Cut(v.Platform, "/")
+
+	return strings.NewReplacer("{out}", v.Out, "{os}", goos, "{arch}", arch, "{commit}", v.Commit, "{version}", v.Version).Replace(s)
 }
 
 // Digest is the SHA-256 of a manifest's bytes in hex.

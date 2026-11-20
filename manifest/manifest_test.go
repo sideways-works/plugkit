@@ -173,3 +173,26 @@ func TestListingFieldsAndMetaKeysAreRefused(t *testing.T) {
 		t.Fatalf("a driver with a listing: %+v %v", m, err)
 	}
 }
+
+func TestCommitAndVersionAreFilledIn(t *testing.T) {
+	m, err := Parse([]byte(`name: board
+kind: extension
+build:
+  image: ` + image + `
+  run: [sh, -c, "echo {version} {commit} > {out}/dist/v"]
+platforms: [any]
+assets: [dist]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := Values{Out: "/out", Commit: "abc", Version: "1.2.3"}.Expand(m.Build.Run[2])
+	if got != "echo 1.2.3 abc > /out/dist/v" {
+		t.Fatalf("expanded %q", got)
+	}
+
+	if _, err := Parse([]byte(strings.Replace(good, "{out}/go-driver", "{out}/{tag}", 1))); err == nil || !strings.Contains(err.Error(), "{tag} is no placeholder") {
+		t.Fatal(err)
+	}
+}

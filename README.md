@@ -135,7 +135,11 @@ asset directories that go with the program. Unknown keys are refused.
 `build` runs the command in that image through `container`, once per
 platform, with the repository mounted read-only, `{out}` the only place it
 can write, no network unless the manifest asks for one, and `GOFLAGS=-trimpath`.
-It lays the plugin out as its zip holds it. `bundle` packs that layout into
+It lays the plugin out as its zip holds it. The command and its environment may also name `{commit}`, the full commit
+built, and `{version}`, the version of the tag the build came through
+(`repository.At`, or a `store.Pin` naming its version), empty otherwise, to
+stamp the program as a release is stamped. A build with a version is kept
+apart from one of the same commit without. `bundle` packs that layout into
 a zip with fixed times and sorted entries, so the same build gives the same
 bytes, and unpacks one safely. `manifest.yaml` must sit at the zip's top
 level. A zip is refused if it has a path that leaves the directory, a

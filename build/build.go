@@ -46,6 +46,9 @@ type Options struct {
 	// Out is the directory the plugin is laid out in; it must not exist yet.
 	Out string
 	Log io.Writer
+	// Commit and Version are what {commit} and {version} stand for: the full commit the build is of,
+	// and the version of the tag it came through, empty when it came through none.
+	Commit, Version string
 }
 
 // Build runs the manifest's command once per platform and lays the plugin out in o.Out.
@@ -172,13 +175,12 @@ func (b builder) platform(ctx context.Context, osArch string, first bool) (bool,
 }
 
 func (b builder) run(ctx context.Context, osArch, scratch string) error {
-	expand := func(s string) string {
-		if osArch == manifest.Any {
-			return manifest.Expand(s, outAt, "")
-		}
-
-		return manifest.Expand(s, outAt, osArch)
+	values := manifest.Values{Out: outAt, Platform: osArch, Commit: b.o.Commit, Version: b.o.Version}
+	if osArch == manifest.Any {
+		values.Platform = ""
 	}
+
+	expand := values.Expand
 
 	env := map[string]string{"HOME": "/tmp", "GOFLAGS": "-trimpath"}
 
