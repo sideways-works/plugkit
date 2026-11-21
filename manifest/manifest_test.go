@@ -478,3 +478,44 @@ func TestALogoMayBeAnHTTPSURL(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeTakesAStringOrAMapping(t *testing.T) {
+	alpine := "docker.io/library/alpine@sha256:" + strings.Repeat("b", 64)
+
+	for text, want := range map[string]Runtime{
+		"runtime: \"node >=22\"\n":                                         {Program: "node >=22"},
+		"runtime: {program: \"node >=22\"}\n":                              {Program: "node >=22"},
+		"runtime: {image: " + alpine + "}\n":                               {Image: alpine},
+		"runtime:\n  native: true\n  image: " + alpine + "\n":              {Image: alpine, Native: true},
+		"runtime: {program: node, image: " + alpine + ", native: false}\n": {Program: "node", Image: alpine},
+	} {
+		m, err := Parse([]byte(good + text))
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+
+		if m.Runtime != want {
+			t.Errorf("%q: %+v, want %+v", text, m.Runtime, want)
+		}
+	}
+
+	if m, err := Parse([]byte(good + "runtime: \"node >=22\"\n")); err != nil {
+		t.Fatal(err)
+	} else if n, r := m.RuntimeOf(); n != "node" || r != ">=22" {
+		t.Errorf("RuntimeOf %q %q", n, r)
+	}
+
+	for text, says := range map[string]string{
+		good + "runtime: {image: alpine:3}\n":             `runtime.image "alpine:3": an image pinned by digest`,
+		meta + "runtime: {native: true}\n":                "only a plugin with a program has a runtime",
+		meta + "runtime: {image: " + alpine + "}\n":       "only a plugin with a program has a runtime",
+		good + "runtime: {other: 1}\n":                    "runtime: line 10: field other not found",
+		good + "runtime: [node]\n":                        "runtime: line 10: a string",
+		good + "runtime: {native: maybe}\n":               "cannot unmarshal",
+		good + "runtime: {program: Node, native: true}\n": `runtime "Node": a name`,
+	} {
+		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: got %v, want %q", text, err, says)
+		}
+	}
+}

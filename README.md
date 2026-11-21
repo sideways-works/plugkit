@@ -214,7 +214,18 @@ over 64 KiB as JSON is refused.
 A manifest's optional `runtime` says what runs the program besides the
 machine, with an optional semver range: `node` or `"node >=22 <27"` for a
 `.mjs` program. Without one the program is a native binary, so a host
-without the runtime can refuse the plugin before it fetches it.
+without the runtime can refuse the plugin before it fetches it. As a
+mapping, `runtime` takes that string as `program`, and may add the `image`
+a host runs the program in, pinned by digest as `build.image` is, and
+`native: true`, for a program that needs nothing of its host, so a host
+that trusts the plugin may run it directly as a process. Only a plugin
+with a `program` has a runtime.
+
+```yaml
+runtime:
+  image: docker.io/library/alpine@sha256:<64 hex>
+  native: true
+```
 
 A manifest of any kind may list its `permissions`, what the plugin lets
 people do: each a `name` (`area:action`, lower-case letters and dashes,

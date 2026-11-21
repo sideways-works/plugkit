@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/sideways-works/plugkit/gitsafe"
+	"github.com/sideways-works/plugkit/manifest"
 )
 
 const image = "golang@sha256:564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1"
@@ -547,5 +548,25 @@ func TestListAndAtGiveTheSpec(t *testing.T) {
 
 	if m, _, err := At(context.Background(), url, ".", "1.0.0", Options{}); err != nil || string(m.Spec) != `{"level":1}` {
 		t.Fatalf("at 1.0.0: %s %v", m.Spec, err)
+	}
+}
+
+func TestAListingReadsARuntimeImage(t *testing.T) {
+	alpine := "docker.io/library/alpine@sha256:" + strings.Repeat("c", 64)
+
+	r := newRepo(t)
+	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints") + "runtime: {image: \"" + alpine + "\", native: true}\n"})
+	r.git("tag", "v1.0.0")
+
+	url := r.bare()
+
+	got, err := List(context.Background(), url, Options{})
+	if err != nil || len(got) != 1 || got[0].Err != nil || got[0].Name != "lint" {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	m, _, err := At(context.Background(), url, ".", "1.0.0", Options{})
+	if err != nil || m.Runtime != (manifest.Runtime{Image: alpine, Native: true}) {
+		t.Fatalf("at 1.0.0: %+v %v", m.Runtime, err)
 	}
 }

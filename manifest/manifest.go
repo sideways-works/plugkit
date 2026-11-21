@@ -39,9 +39,10 @@ type Manifest struct {
 	// Node plugin. It may be left out only with platforms [any], for a plugin of assets or included
 	// paths alone.
 	Program string `yaml:"program"`
-	// Runtime is what runs the program besides the machine itself, with an optional semver range:
-	// node for a <program>.mjs, "node >=22 <27". Empty means a native binary.
-	Runtime   string   `yaml:"runtime"`
+	// Runtime is what runs the program besides the machine itself: a string names the program
+	// runtime alone, a mapping may add the image a host runs the program in and whether the host may
+	// run it directly.
+	Runtime   Runtime  `yaml:"runtime"`
 	Build     Build    `yaml:"build"`
 	Platforms []string `yaml:"platforms"`
 	// Files are copied from the plugin's directory to the top level, beside the program.
@@ -358,30 +359,93 @@ func (m Manifest) checkListing(add func(string, ...any)) {
 	}
 }
 
-// RuntimeOf is the runtime's name and its version range, empty when the manifest names none.
+// Runtime is what runs the program besides the machine itself.
+type Runtime struct {
+	// Program is the program runtime with an optional semver range: node for a <program>.mjs,
+	// "node >=22 <27". Empty means a native binary. The string form of runtime sets it alone.
+	Program string `yaml:"program"`
+	// Image is the image a host runs the program in, pinned by digest: name[:tag]@sha256:<64 hex>.
+	Image string `yaml:"image"`
+	// Native says the program needs nothing of its host: a host may run it directly, as a process,
+	// when it trusts the plugin.
+	Native bool `yaml:"native"`
+}
+
+var errRuntime = errors.New("runtime")
+
+// UnmarshalYAML reads a string as the program runtime, and a mapping of program, image and native,
+// refusing any other key.
+func (r *Runtime) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return n.Decode(&r.Program) //nolint:wrapcheck // the decoder's own error, with its line
+	case yaml.MappingNode:
+	default:
+		return fmt.Errorf("%w: line %d: a string, such as \"node >=22\", or a mapping of program, image and native", errRuntime, n.Line)
+	}
+
+	var out Runtime
+
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+
+		var err error
+
+		switch k.Value {
+		case "program":
+			err = v.Decode(&out.Program)
+		case "image":
+			err = v.Decode(&out.Image)
+		case "native":
+			err = v.Decode(&out.Native)
+		default:
+			return fmt.Errorf("%w: line %d: field %s not found: it takes program, image and native", errRuntime, k.Line, k.Value)
+		}
+
+		if err != nil {
+			return err //nolint:wrapcheck // the decoder's own error, with its line
+		}
+	}
+
+	*r = out
+
+	return nil
+}
+
+// IsZero tells whether the manifest names no runtime.
+func (r Runtime) IsZero() bool { return r == Runtime{} }
+
+// RuntimeOf is the program runtime's name and its version range, empty when the manifest names
+// none.
 func (m Manifest) RuntimeOf() (string, string) {
-	n, r, _ := strings.Cut(strings.TrimSpace(m.Runtime), " ")
+	n, r, _ := strings.Cut(strings.TrimSpace(m.Runtime.Program), " ")
 
 	return n, strings.TrimSpace(r)
 }
 
 func (m Manifest) checkRuntime(add func(string, ...any)) {
-	if m.Runtime == "" {
+	if m.Runtime.IsZero() {
 		return
 	}
 
-	n, r := m.RuntimeOf()
+	if m.Runtime.Program != "" {
+		n, r := m.RuntimeOf()
 
-	if !name.MatchString(n) {
-		add("runtime %q: a name, such as node, and an optional semver range", m.Runtime)
-	} else if r != "" {
-		if _, err := semver.ParseRange(r); err != nil {
-			add("runtime %q: %v", m.Runtime, err)
+		if !name.MatchString(n) {
+			add("runtime %q: a name, such as node, and an optional semver range", m.Runtime.Program)
+		} else if r != "" {
+			if _, err := semver.ParseRange(r); err != nil {
+				add("runtime %q: %v", m.Runtime.Program, err)
+			}
 		}
 	}
 
+	if img := m.Runtime.Image; img != "" && (!digest.MatchString(img) || strings.HasPrefix(img, "@")) {
+		add("runtime.image %q: an image pinned by digest, name@sha256:<64 hex>", img)
+	}
+
 	if m.Program == "" {
-		add("runtime %q: only a plugin with a program has a runtime", m.Runtime)
+		add("runtime: only a plugin with a program has a runtime")
 	}
 }
 

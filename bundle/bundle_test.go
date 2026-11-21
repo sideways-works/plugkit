@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sideways-works/plugkit/manifest"
 )
 
 // manifestText has comments and odd spacing, so only a byte-for-byte copy keeps it.
@@ -331,5 +333,29 @@ func TestASpecGoesThroughTheZip(t *testing.T) {
 
 	if data, _ := os.ReadFile(filepath.Join(dest, "manifest.yaml")); string(data) != text { //nolint:errcheck // compared
 		t.Fatalf("the manifest changed:\n%s", data)
+	}
+}
+
+func TestAZipWithARuntimeImagePacksAndUnpacks(t *testing.T) {
+	alpine := "docker.io/library/alpine@sha256:" + strings.Repeat("d", 64)
+	text := manifestText + "runtime:   # where the program runs\n  image: " + alpine + "\n  native: true\n"
+
+	entries := slices.Clone(plugin)
+	entries[0].body = text
+
+	data := packed(t, layout(t, entries...))
+	dest := filepath.Join(t.TempDir(), "plugin")
+
+	m, err := Unpack(writeZip(t, data), dest, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.Runtime != (manifest.Runtime{Image: alpine, Native: true}) {
+		t.Fatalf("runtime %+v", m.Runtime)
+	}
+
+	if got, _ := os.ReadFile(filepath.Join(dest, "manifest.yaml")); string(got) != text { //nolint:errcheck // compared
+		t.Fatalf("the manifest changed:\n%s", got)
 	}
 }
