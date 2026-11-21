@@ -53,9 +53,9 @@ type Manifest struct {
 	// the same relative paths, after the build if there is one. A plugin with no program may have
 	// no build at all: then nothing runs.
 	Include []string `yaml:"include"`
-	// Description and Logo, a file of the plugin's directory or an https URL, are for listings.
+	// Description and Logo are for listings.
 	Description string `yaml:"description"`
-	Logo        string `yaml:"logo"`
+	Logo        Logo   `yaml:"logo"`
 	// Implements and Requires are "<name> <semver range>": the interfaces the plugin offers and those
 	// it needs another plugin to offer.
 	Implements []string `yaml:"implements"`
@@ -339,14 +339,16 @@ func (m Manifest) checkLayout(add func(string, ...any)) {
 }
 
 func (m Manifest) checkListing(add func(string, ...any)) {
-	switch {
-	case m.Logo == "" || localPath(m.Logo):
-	case strings.Contains(m.Logo, "://"):
-		if !LogoURL(m.Logo) {
-			add("logo %q: an https URL with a host and no user or password, at most %d bytes", m.Logo, maxLogoURL)
+	for _, l := range []struct{ key, logo string }{{"logo.light", m.Logo.Light}, {"logo.dark", m.Logo.Dark}} {
+		switch {
+		case l.logo == "" || localPath(l.logo):
+		case strings.Contains(l.logo, "://"):
+			if !LogoURL(l.logo) {
+				add("%s %q: an https URL with a host and no user or password, at most %d bytes", l.key, l.logo, maxLogoURL)
+			}
+		default:
+			add("%s %q: a file of the plugin's directory, without .., or an https URL", l.key, l.logo)
 		}
-	default:
-		add("logo %q: a file of the plugin's directory, without .., or an https URL", m.Logo)
 	}
 
 	for key, list := range map[string][]string{"implements": m.Implements, "requires": m.Requires} {
@@ -500,6 +502,88 @@ func (m Manifest) checkMeta(add func(string, ...any)) {
 	}
 }
 
+// Logo is the image a listing shows of a plugin, for a light and for a dark color scheme: each a
+// file of the plugin's directory or an https URL. The string form sets Light alone, and either one
+// alone stands in for both.
+type Logo struct {
+	Light string `yaml:"light"`
+	Dark  string `yaml:"dark"`
+}
+
+var errLogo = errors.New("logo")
+
+// UnmarshalYAML reads a string, such as "logo.svg", as Light, and a mapping of light and dark.
+func (l *Logo) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		*l = Logo{}
+
+		return n.Decode(&l.Light) //nolint:wrapcheck // the decoder's own error, with its line
+	case yaml.MappingNode:
+	default:
+		return fmt.Errorf("%w: line %d: a string, such as \"logo.svg\", or a mapping of light and dark", errLogo, n.Line)
+	}
+
+	var out Logo
+
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+
+		var err error
+
+		switch k.Value {
+		case "light":
+			err = v.Decode(&out.Light)
+		case "dark":
+			err = v.Decode(&out.Dark)
+		default:
+			return fmt.Errorf("%w: line %d: field %s not found: it takes light and dark", errLogo, k.Line, k.Value)
+		}
+
+		if err != nil {
+			return err //nolint:wrapcheck // the decoder's own error, with its line
+		}
+	}
+
+	*l = out
+
+	return nil
+}
+
+// IsZero tells whether there is no logo.
+func (l Logo) IsZero() bool { return l == Logo{} }
+
+// ForLight is the logo for a light color scheme: Light, or else Dark.
+func (l Logo) ForLight() string {
+	if l.Light != "" {
+		return l.Light
+	}
+
+	return l.Dark
+}
+
+// ForDark is the logo for a dark color scheme: Dark, or else Light.
+func (l Logo) ForDark() string {
+	if l.Dark != "" {
+		return l.Dark
+	}
+
+	return l.Light
+}
+
+// Files are the logos named, each once.
+func (l Logo) Files() []string {
+	var out []string
+
+	for _, f := range []string{l.Light, l.Dark} {
+		if f != "" && !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+
+	return out
+}
+
 // maxLogoURL bounds a logo's URL.
 const maxLogoURL = 2048
 
@@ -576,8 +660,10 @@ func (m Manifest) AnyPlatform() bool {
 func (m Manifest) Extras() []string {
 	var out []string
 
-	if m.Logo != "" && !LogoURL(m.Logo) {
-		out = append(out, m.Logo)
+	for _, l := range m.Logo.Files() {
+		if !LogoURL(l) {
+			out = append(out, l)
+		}
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(m.Schemas)) {

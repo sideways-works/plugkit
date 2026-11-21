@@ -461,7 +461,7 @@ func TestSpecsAreRefused(t *testing.T) {
 // A logo is a file of the plugin's directory or an https URL, which is no file the plugin holds.
 func TestALogoMayBeAnHTTPSURL(t *testing.T) {
 	m, err := Parse([]byte(included + "logo: https://example.com/logos/cache.svg?v=2\n"))
-	if err != nil || len(m.Extras()) != 0 || !LogoURL(m.Logo) {
+	if err != nil || len(m.Extras()) != 0 || !LogoURL(m.Logo.Light) {
 		t.Fatalf("%+v %v", m, err)
 	}
 
@@ -513,6 +513,51 @@ func TestRuntimeTakesAStringOrAMapping(t *testing.T) {
 		good + "runtime: [node]\n":                        "runtime: line 10: a string",
 		good + "runtime: {native: maybe}\n":               "cannot unmarshal",
 		good + "runtime: {program: Node, native: true}\n": `runtime "Node": a name`,
+	} {
+		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: got %v, want %q", text, err, says)
+		}
+	}
+}
+
+func TestALogoTakesAStringOrAMapping(t *testing.T) {
+	for text, want := range map[string]Logo{
+		"logo: logo.svg\n": {Light: "logo.svg"},
+		"logo: {light: logo.svg, dark: logo-dark.svg}\n":           {Light: "logo.svg", Dark: "logo-dark.svg"},
+		"logo:\n  light: logo.svg\n":                               {Light: "logo.svg"},
+		"logo: {dark: logo-dark.svg}\n":                            {Dark: "logo-dark.svg"},
+		"logo: {light: logo.svg, dark: \"https://x.dev/d.png\"}\n": {Light: "logo.svg", Dark: "https://x.dev/d.png"},
+	} {
+		m, err := Parse([]byte(good + text))
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+
+		if m.Logo != want {
+			t.Errorf("%q: %+v, want %+v", text, m.Logo, want)
+		}
+	}
+
+	// either alone stands in for both
+	if l := (Logo{Dark: "d.svg"}); l.ForLight() != "d.svg" || l.ForDark() != "d.svg" {
+		t.Errorf("dark alone: %q %q", l.ForLight(), l.ForDark())
+	}
+
+	if l := (Logo{Light: "l.svg"}); l.ForLight() != "l.svg" || l.ForDark() != "l.svg" {
+		t.Errorf("light alone: %q %q", l.ForLight(), l.ForDark())
+	}
+
+	// both files go along beside the manifest, a URL doesn't
+	m, err := Parse([]byte(good + "logo: {light: logo.svg, dark: logo-dark.svg}\n"))
+	if err != nil || !slices.Equal(m.Extras(), []string{"logo-dark.svg", "logo.svg"}) {
+		t.Fatalf("extras %q, %v", m.Extras(), err)
+	}
+
+	for text, says := range map[string]string{
+		good + "logo: {light: logo.svg, other: x.svg}\n": "logo: line 10: field other not found: it takes light and dark",
+		good + "logo: [logo.svg]\n":                      "logo: line 10: a string",
+		good + "logo: {dark: ../logo.svg}\n":             `logo.dark "../logo.svg": a file of the plugin's directory`,
+		good + "logo: {light: \"http://x.dev/l.png\"}\n": `logo.light "http://x.dev/l.png": an https URL`,
 	} {
 		if _, err := Parse([]byte(text)); !errors.Is(err, ErrManifest) || !strings.Contains(err.Error(), says) {
 			t.Errorf("%q: got %v, want %q", text, err, says)

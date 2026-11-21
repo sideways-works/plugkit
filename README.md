@@ -180,6 +180,9 @@ r, err := s.Resolve(ctx, store.Pin{Zip: &store.Zip{URL: url, SHA256: sum}}, "lin
 A plugin manifest may also carry what a listing shows, `description` and
 `logo` (a file of the plugin's directory, or an `https://` URL), and what the plugin offers and
 needs, `implements` and `requires`, each a list of `"<name> <semver range>"`.
+`logo` is one image for both color schemes, or one for each:
+`logo: {light: logo.svg, dark: logo-dark.svg}`, either alone standing in
+for both. A repository manifest's entry takes `logo` in the same two forms.
 A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 `schemas`, a JSON Schema file for each message and one for its answer, with
 an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
@@ -252,8 +255,8 @@ names another commit when read again after the fetch, or another than
 `Options.Commit`.
 
 A logo given as a URL is fetched by `List` and `AtRelease` (`At` with the
-version's logo), so a host gets `LogoData` and `LogoType` and fetches
-nothing itself. Manifests are untrusted, so the fetch is https alone, with
+version's logo), so a host gets `LogoData` and `LogoType`, and for a dark
+color scheme `DarkLogoData` and `DarkLogoType`, and fetches nothing itself. Manifests are untrusted, so the fetch is https alone, with
 no credential, cookie, proxy or redirect, within 10 seconds and 256 KiB,
 and its dialer refuses every loopback, private, link-local (169.254.169.254
 among them), CGNAT, unspecified, multicast and reserved address, checked

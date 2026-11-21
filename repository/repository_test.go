@@ -570,3 +570,39 @@ func TestAListingReadsARuntimeImage(t *testing.T) {
 		t.Fatalf("at 1.0.0: %+v %v", m.Runtime, err)
 	}
 }
+
+func TestAListingReadsALightAndADarkLogo(t *testing.T) {
+	const light, dark = `<svg xmlns="http://www.w3.org/2000/svg"><title>light</title></svg>`, `<svg xmlns="http://www.w3.org/2000/svg"><title>dark</title></svg>`
+
+	r := newRepo(t)
+	text := strings.Replace(pluginManifest("lint", "driver", "Lints"), "logo: logo.svg\n", "logo: {light: logo.svg, dark: logo-dark.svg}\n", 1)
+	r.commit(map[string]string{"manifest.yaml": text, "logo.svg": light, "logo-dark.svg": dark})
+	r.git("tag", "v1.0.0")
+
+	url := r.bare()
+
+	got, err := List(context.Background(), url, Options{})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	p := got[0]
+	if p.Err != nil || p.LogoErr != nil || p.DarkLogoErr != nil || p.Logo != "logo.svg" || p.DarkLogo != "logo-dark.svg" ||
+		string(p.LogoData) != light || string(p.DarkLogoData) != dark || p.DarkLogoType != "image/svg+xml" {
+		t.Fatalf("listed %+v", p)
+	}
+
+	rel, err := AtRelease(context.Background(), url, ".", "1.0.0", Options{})
+	if err != nil || rel.Manifest.Logo != (manifest.Logo{Light: "logo.svg", Dark: "logo-dark.svg"}) ||
+		string(rel.LogoData) != light || string(rel.DarkLogoData) != dark {
+		t.Fatalf("at 1.0.0: %+v %v", rel, err)
+	}
+
+	// one logo stands in for both
+	r.commit(map[string]string{"manifest.yaml": strings.Replace(text, "{light: logo.svg, dark: logo-dark.svg}", "{dark: logo-dark.svg}", 1)})
+
+	got, err = List(context.Background(), r.bare(), Options{})
+	if err != nil || len(got) != 1 || got[0].Logo != "logo-dark.svg" || string(got[0].LogoData) != dark || string(got[0].DarkLogoData) != dark {
+		t.Fatalf("dark alone: %+v %v", got, err)
+	}
+}

@@ -359,3 +359,34 @@ func TestAZipWithARuntimeImagePacksAndUnpacks(t *testing.T) {
 		t.Fatalf("the manifest changed:\n%s", got)
 	}
 }
+
+func TestAZipWithALightAndADarkLogoPacksAndUnpacks(t *testing.T) {
+	text := manifestText + "logo:   # one per color scheme\n  light: logo.svg\n  dark: logo-dark.svg\n"
+
+	entries := slices.Clone(plugin)
+	entries[0].body = text
+	entries = append(entries, entry{"logo.svg", 0o644, "<svg>light</svg>"}, entry{"logo-dark.svg", 0o644, "<svg>dark</svg>"})
+
+	data := packed(t, layout(t, entries...))
+	dest := filepath.Join(t.TempDir(), "plugin")
+
+	m, err := Unpack(writeZip(t, data), dest, Limits{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.Logo != (manifest.Logo{Light: "logo.svg", Dark: "logo-dark.svg"}) {
+		t.Fatalf("logo %+v", m.Logo)
+	}
+
+	for name, want := range map[string]string{"manifest.yaml": text, "logo.svg": "<svg>light</svg>", "logo-dark.svg": "<svg>dark</svg>"} {
+		if got, _ := os.ReadFile(filepath.Join(dest, name)); string(got) != want { //nolint:errcheck // compared
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+
+	// packed again, the plugin is the same zip
+	if again := packed(t, dest); !bytes.Equal(again, data) {
+		t.Fatal("the unpacked plugin packs to other bytes")
+	}
+}

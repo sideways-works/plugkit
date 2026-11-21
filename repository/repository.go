@@ -50,11 +50,11 @@ type Repository struct {
 // Entry is one plugin: its manifest, whose directory is its path, and what a listing shows of it;
 // empty fields take the plugin manifest's.
 type Entry struct {
-	Manifest    string `yaml:"manifest"`
-	Name        string `yaml:"name"`
-	Kind        string `yaml:"kind"`
-	Description string `yaml:"description"`
-	Logo        string `yaml:"logo"`
+	Manifest    string        `yaml:"manifest"`
+	Name        string        `yaml:"name"`
+	Kind        string        `yaml:"kind"`
+	Description string        `yaml:"description"`
+	Logo        manifest.Logo `yaml:"logo"`
 }
 
 // Path is the plugin's directory, "." for the repository's root.
@@ -134,8 +134,10 @@ func (r Repository) check() []string {
 			add("plugins[%d]: %s is listed twice", i, e.Path())
 		case e.Name != "" && names[e.Name]:
 			add("plugins[%d]: the name %s is listed twice", i, e.Name)
-		case e.Logo != "" && !local(e.Logo):
-			add("plugins[%d].logo %q: a file of the repository, without ..", i, e.Logo)
+		case e.Logo.Light != "" && !local(e.Logo.Light):
+			add("plugins[%d].logo.light %q: a file of the repository, without ..", i, e.Logo.Light)
+		case e.Logo.Dark != "" && !local(e.Logo.Dark):
+			add("plugins[%d].logo.dark %q: a file of the repository, without ..", i, e.Logo.Dark)
 		}
 
 		paths[e.Path()] = true
@@ -156,14 +158,21 @@ func local(p string) bool {
 // Plugin is a plugin of a repository as a listing shows it, its versions newest first. Err says
 // why its manifest couldn't be read, and the listing holds the other plugins all the same.
 type Plugin struct {
-	Path, Name, Kind, Description, Logo string
-	// Logo is a file of the repository or an https URL. LogoData is the logo's content and LogoType
-	// its media type: an SVG, PNG, JPEG or WebP image of at most MaxLogo bytes, by its content.
-	// LogoErr says why there is none; it never fails the plugin. An SVG is the plugin author's, and
-	// a host sanitizes it before rendering it.
+	Path, Name, Kind, Description string
+	// Logo is the logo for a light color scheme, a file of the repository or an https URL. LogoData
+	// is its content and LogoType its media type: an SVG, PNG, JPEG or WebP image of at most MaxLogo
+	// bytes, by its content. LogoErr says why there is none; it never fails the plugin. An SVG is
+	// the plugin author's, and a host sanitizes it before rendering it.
+	Logo     string
 	LogoData []byte
 	LogoType string
 	LogoErr  error
+	// DarkLogo and the fields after it are the same for a dark color scheme. A plugin with one
+	// logo has it in both.
+	DarkLogo     string
+	DarkLogoData []byte
+	DarkLogoType string
+	DarkLogoErr  error
 	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
 	Spec     json.RawMessage
 	Versions []Version
@@ -292,14 +301,14 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 			}
 		}
 
-		if p.Err == nil && p.Logo != "" {
+		if p.Err == nil {
 			// a logo's URL is fetched once for each version: the newest, or with none the commit
 			version := head
 			if len(p.Versions) > 0 {
 				version = p.Versions[0].Version
 			}
 
-			p.LogoData, p.LogoType, p.LogoErr = g.logo(ctx, head, p.Logo, version, opt)
+			p.LogoData, p.LogoType, p.LogoErr, p.DarkLogoData, p.DarkLogoType, p.DarkLogoErr = g.logos(ctx, head, p.Logo, p.DarkLogo, version, opt)
 		}
 
 		out = append(out, p)
@@ -312,10 +321,32 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 	p, err := g.plugin(ctx, commit, e)
 	if err != nil {
-		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo, Err: err}
+		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Err: err}
 	}
 
 	return p
+}
+
+// logos are the images at light and at dark, as logo reads each; the same name is read once.
+func (g *git) logos(ctx context.Context, commit, light, dark, version string, opt Options) ([]byte, string, error, []byte, string, error) { //nolint:revive // light's three and dark's three
+	var (
+		lData, dData []byte
+		lType, dType string
+		lErr, dErr   error
+	)
+
+	if light != "" {
+		lData, lType, lErr = g.logo(ctx, commit, light, version, opt)
+	}
+
+	switch {
+	case dark == light:
+		dData, dType, dErr = lData, lType, lErr
+	case dark != "":
+		dData, dType, dErr = g.logo(ctx, commit, dark, version, opt)
+	}
+
+	return lData, lType, lErr, dData, dType, dErr
 }
 
 // logo is the image at name, a file of the repository at commit or an https URL fetched for
@@ -371,15 +402,19 @@ func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Ma
 	return r.Manifest, r.Commit, err
 }
 
-// Release is a version of a plugin: its manifest and commit as At reads them, and its logo as a
-// listing gives it, LogoErr saying why there is none.
+// Release is a version of a plugin: its manifest and commit as At reads them, and its logos as a
+// listing gives them, LogoErr and DarkLogoErr saying why there is none.
 type Release struct {
-	Manifest manifest.Manifest
-	Commit   string
-	Logo     string
-	LogoData []byte
-	LogoType string
-	LogoErr  error
+	Manifest     manifest.Manifest
+	Commit       string
+	Logo         string
+	LogoData     []byte
+	LogoType     string
+	LogoErr      error
+	DarkLogo     string
+	DarkLogoData []byte
+	DarkLogoType string
+	DarkLogoErr  error
 }
 
 // AtRelease is At with the version's logo: a file of the repository at the version's commit, or
@@ -442,25 +477,33 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 		return Release{}, fmt.Errorf("%w: %s's tag %s names %s, not %s", ErrMoved, url, tag, commit, opt.Commit)
 	}
 
-	rel := Release{Manifest: m, Commit: commit, Logo: logoOf(r.Plugins[i], m)}
-	if withLogo && rel.Logo != "" {
-		rel.LogoData, rel.LogoType, rel.LogoErr = g.logo(ctx, commit, rel.Logo, strings.TrimPrefix(version, "v"), opt)
+	logo := logoOf(r.Plugins[i], m)
+
+	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark()}
+	if withLogo {
+		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
+			strings.TrimPrefix(version, "v"), opt)
 	}
 
 	return rel, nil
 }
 
-// logoOf is the logo a listing shows of e: the repository manifest's, a file named from the
-// repository's root, or else the plugin manifest's, a file of its directory or a URL.
-func logoOf(e Entry, m manifest.Manifest) string {
-	switch {
-	case e.Logo != "" || m.Logo == "":
+// logoOf is the logo a listing shows of e: the repository manifest's, files named from the
+// repository's root, or else the plugin manifest's, files of its directory or URLs.
+func logoOf(e Entry, m manifest.Manifest) manifest.Logo {
+	if !e.Logo.IsZero() {
 		return e.Logo
-	case manifest.LogoURL(m.Logo):
-		return m.Logo
 	}
 
-	return path.Join(e.Path(), m.Logo)
+	inRepo := func(l string) string {
+		if l == "" || manifest.LogoURL(l) {
+			return l
+		}
+
+		return path.Join(e.Path(), l)
+	}
+
+	return manifest.Logo{Light: inRepo(m.Logo.Light), Dark: inRepo(m.Logo.Dark)}
 }
 
 // versions are the tags of p that pattern names, newest first.
@@ -689,7 +732,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		return Plugin{}, err
 	}
 
-	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo, Spec: m.Spec}
+	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Spec: m.Spec}
 
 	if p.Name == "" {
 		p.Name = m.Name
@@ -703,7 +746,8 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		p.Description = m.Description
 	}
 
-	p.Logo = logoOf(e, m)
+	logo := logoOf(e, m)
+	p.Logo, p.DarkLogo = logo.ForLight(), logo.ForDark()
 
 	return p, nil
 }
