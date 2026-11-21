@@ -148,7 +148,10 @@ version of the tag the build came through (`repository.At`, or a
 `store.Pin` naming its version) without its `v`, or `0.0.0-dev+<the
 commit's first 12 characters>` when it came through none, a version Go and
 npm both take, to stamp the program as a release is stamped. A build with a version is kept
-apart from one of the same commit without. `bundle` packs that layout into
+apart from one of the same commit without. A host that runs the commands
+itself, in sandboxes of its own, hands `build.Layout` the directory each
+platform's build wrote `{out}` into, and gets the layout `Build` would have
+made from them. `bundle` packs that layout into
 a zip with fixed times and sorted entries, so the same build gives the same
 bytes, and unpacks one safely. `manifest.yaml` must sit at the zip's top
 level. A zip is refused if it has a path that leaves the directory, a

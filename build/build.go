@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -104,37 +105,140 @@ func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
 		b.src = dir
 	}
 
-	for i, p := range platforms {
-		if !m.Builds() {
+	scratch := map[string]string{}
+
+	defer func() {
+		for _, dir := range scratch {
+			_ = os.RemoveAll(dir) //nolint:errcheck // a scratch directory
+		}
+	}()
+
+	built, err := b.runAll(ctx, platforms, scratch)
+	if err != nil {
+		return m, err
+	}
+
+	return m, b.layout(ctx, built, scratch)
+}
+
+// runAll runs the build's commands for each platform in order, into a scratch directory of its own
+// it adds to scratch, and says which platforms it built.
+func (b builder) runAll(ctx context.Context, platforms []string, scratch map[string]string) ([]string, error) {
+	var built []string
+
+	for _, p := range platforms {
+		if !b.m.Builds() {
 			break
 		}
 
-		script, err := b.platform(ctx, p, i == 0)
+		dir, err := os.MkdirTemp(filepath.Dir(b.o.Out), ".build-")
 		if err != nil {
-			return m, err
+			return nil, fmt.Errorf("%w: %w", ErrBuild, err)
+		}
+
+		scratch[p] = dir
+		built = append(built, p)
+
+		if err := b.run(ctx, p, dir); err != nil {
+			return nil, err
 		}
 
 		// a Node plugin's script is the same on every platform: one build makes it
+		if b.m.Program != "" && regular(filepath.Join(dir, b.m.Script())) {
+			break
+		}
+	}
+
+	return built, nil
+}
+
+// LayoutOptions are as Options for the plugin's layout alone: Scratch has the directory each
+// platform's build wrote {out} into, by os/arch, or any for a plugin of platforms [any].
+type LayoutOptions struct {
+	Root, Dir string
+	Manifest  []byte
+	Tree      bool
+	Out       string
+	Scratch   map[string]string
+}
+
+// Layout lays the plugin out in o.Out, which must not exist yet, exactly as Build does once its
+// commands ran: for a host that runs the build's commands itself, each platform's into a scratch
+// directory of its own. It moves each program out of its scratch directory and copies the assets
+// of the first of the manifest's platforms, so the layout is Build's when the commands wrote what
+// Build's would. A plugin that builds nothing takes no scratch directory.
+func Layout(ctx context.Context, o LayoutOptions) (manifest.Manifest, error) {
+	m, err := manifest.Parse(o.Manifest)
+	if err != nil {
+		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBuild, err)
+	}
+
+	var order []string
+
+	switch {
+	case !m.Builds() && len(o.Scratch) > 0:
+		return m, fmt.Errorf("%w: plugin %s has no build to lay out", ErrBuild, m.Name)
+	case m.Builds() && len(o.Scratch) == 0:
+		return m, fmt.Errorf("%w: plugin %s: no build's {out} to lay out", ErrBuild, m.Name)
+	case m.Builds():
+		want := slices.Sorted(maps.Keys(o.Scratch))
+
+		if order, err = choose(m, want); err != nil {
+			return m, err
+		}
+
+		if !m.AnyPlatform() {
+			order = slices.DeleteFunc(slices.Clone(m.Platforms), func(p string) bool { return o.Scratch[p] == "" })
+		}
+	}
+
+	if err := os.Mkdir(o.Out, 0o750); err != nil {
+		return m, fmt.Errorf("%w: %w", ErrBuild, err)
+	}
+
+	b := builder{o: Options{Root: o.Root, Dir: o.Dir, Manifest: o.Manifest, Tree: o.Tree, Out: o.Out}, m: m}
+
+	return m, b.layout(ctx, order, o.Scratch)
+}
+
+// layout moves each platform's program from its scratch directory, in order, keeping the first's
+// assets and stopping at a Node script, then copies the included paths, files and extras and writes
+// the manifest.
+func (b builder) layout(ctx context.Context, platforms []string, scratch map[string]string) error {
+	for i, p := range platforms {
+		script, err := b.program(p, scratch[p])
+		if err != nil {
+			return err
+		}
+
+		if i == 0 {
+			for _, a := range b.m.Assets {
+				if err := copyAssets(filepath.Join(scratch[p], filepath.FromSlash(a)), filepath.Join(b.o.Out, filepath.FromSlash(a)), a); err != nil {
+					return err
+				}
+			}
+		}
+
 		if script {
 			break
 		}
 	}
 
 	if err := b.copies(ctx); err != nil {
-		return m, err
+		return err
 	}
 
-	if err := manifest.CheckSchemas(m, func(f string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(o.Out, filepath.FromSlash(f)))
+	if err := manifest.CheckSchemas(b.m, func(f string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(b.o.Out, filepath.FromSlash(f)))
 	}); err != nil {
-		return m, fmt.Errorf("%w: %w", ErrBuild, err)
+		return fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
-	if err := os.WriteFile(filepath.Join(o.Out, manifest.FileName), o.Manifest, 0o644); err != nil { //nolint:gosec // a plugin's files are readable
-		return m, fmt.Errorf("%w: %w", ErrBuild, err)
+	if err := os.WriteFile(filepath.Join(b.o.Out, manifest.FileName), b.o.Manifest, 0o644); err != nil { //nolint:gosec // a plugin's files are readable
+		return fmt.Errorf("%w: %w", ErrBuild, err)
 	}
 
-	return m, nil
+	return nil
 }
 
 func choose(m manifest.Manifest, want []string) ([]string, error) {
@@ -165,35 +269,6 @@ type builder struct {
 	tool string
 	// src is the writable copy of the repository the build runs in with build.copy, else empty.
 	src string
-}
-
-// platform builds for one platform, keeping the assets of the first build; it says whether the
-// build wrote a Node script.
-func (b builder) platform(ctx context.Context, osArch string, first bool) (bool, error) {
-	scratch, err := os.MkdirTemp(filepath.Dir(b.o.Out), ".build-")
-	if err != nil {
-		return false, fmt.Errorf("%w: %w", ErrBuild, err)
-	}
-	defer os.RemoveAll(scratch) //nolint:errcheck // a scratch directory
-
-	if err := b.run(ctx, osArch, scratch); err != nil {
-		return false, err
-	}
-
-	script, err := b.program(osArch, scratch)
-	if err != nil {
-		return false, err
-	}
-
-	if first {
-		for _, a := range b.m.Assets {
-			if err := copyAssets(filepath.Join(scratch, filepath.FromSlash(a)), filepath.Join(b.o.Out, filepath.FromSlash(a)), a); err != nil {
-				return false, err
-			}
-		}
-	}
-
-	return script, nil
 }
 
 func (b builder) run(ctx context.Context, osArch, scratch string) error {
