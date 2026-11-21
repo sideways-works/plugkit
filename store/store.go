@@ -481,14 +481,22 @@ func (s Store) checkout(ctx context.Context, mirror, commit, dir string) error {
 		return fmt.Errorf("%w: checkout: %w", ErrPin, err)
 	}
 
-	err = untarAll(tar.NewReader(out), dir)
-	if err != nil {
-		_, _ = io.Copy(io.Discard, out) //nolint:errcheck // only so git can end
-	}
+	err = extract(out, dir)
 
 	if werr := cmd.Wait(); err == nil && werr != nil {
 		err = fmt.Errorf("%w: git archive %s: %w: %s", ErrPin, commit, werr, strings.TrimSpace(errOut.String()))
 	}
+
+	return err
+}
+
+// extract unpacks the tar stream into dir and then reads the stream to its end: a tar ends before
+// its padding to a whole record, and a writer still holding padding a pipe has no room for would
+// never exit.
+func extract(r io.Reader, dir string) error {
+	err := untarAll(tar.NewReader(r), dir)
+
+	_, _ = io.Copy(io.Discard, r) //nolint:errcheck // only so the writer can end
 
 	return err
 }
