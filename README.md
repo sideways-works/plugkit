@@ -338,4 +338,8 @@ Install the commit-msg hook once per clone with
 `cp ci/commit-msg "$(git rev-parse --git-path hooks)/commit-msg"`. Lint with
 `golangci-lint run ./...` and test with `go test ./...` before each commit.
 
-plugkit is licensed under the Apache License, Version 2.0.
+## License
+
+plugkit is licensed under the [Apache License, Version 2.0](LICENSE), so
+the plugins and tools built with it may carry any license. Every folder of
+it is under that license.
