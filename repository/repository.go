@@ -328,7 +328,7 @@ func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 }
 
 // logos are the images at light and at dark, as logo reads each; the same name is read once.
-func (g *git) logos(ctx context.Context, commit, light, dark, version string, opt Options) ([]byte, string, error, []byte, string, error) { //nolint:revive // light's three and dark's three
+func (g *git) logos(ctx context.Context, commit, light, dark, version string, opt Options) ([]byte, string, error, []byte, string, error) {
 	var (
 		lData, dData []byte
 		lType, dType string
