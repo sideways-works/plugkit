@@ -12,6 +12,7 @@ import (
 
 	"github.com/sideways-works/plugkit/bundle"
 	"github.com/sideways-works/plugkit/manifest"
+	"go.yaml.in/yaml/v3"
 )
 
 func pack(t *testing.T, dir string) []byte {
@@ -142,5 +143,24 @@ func TestLayoutRefusesScratchThatIsNoBuildOfThePlugin(t *testing.T) {
 		if !errors.Is(err, ErrBuild) || !strings.Contains(err.Error(), c.says) {
 			t.Errorf("%s: got %v, want %q", name, err, c.says)
 		}
+	}
+}
+
+func TestALayoutCopiesTheFilesAProductsKeyNames(t *testing.T) {
+	text := layoutManifest + "icons: [icons/a.svg]\n"
+	ext := manifest.Extensions{"icons": {Files: func(n *yaml.Node) []string { return []string{n.Content[0].Value} }}}
+
+	root := t.TempDir()
+	write(t, root, map[string]string{"LICENSE": "license\n", "manifest.yaml": text, "icons/a.svg": "<svg/>"})
+
+	out := filepath.Join(t.TempDir(), "hello")
+	if _, err := Layout(context.Background(), LayoutOptions{
+		Root: root, Manifest: []byte(text), Out: out, Scratch: scratchFor(t, "darwin/arm64", "linux/amd64"), Extensions: ext,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, _ := os.ReadFile(filepath.Join(out, "icons", "a.svg")); string(data) != "<svg/>" { //nolint:errcheck // compared
+		t.Fatalf("icons/a.svg: %q", data)
 	}
 }

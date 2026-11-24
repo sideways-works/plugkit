@@ -255,8 +255,12 @@ type Plugin struct {
 	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
 	Spec json.RawMessage
 	// Extra are the plugin manifest's extra keys with the repository manifest entry's over them,
-	// as the YAML holds them: the product's to read.
-	Extra    map[string]yaml.Node
+	// as the YAML holds them: the product's to read. ManifestExtra are the plugin manifest's alone:
+	// a path in them is from the plugin's directory, one an entry gives from the repository's root.
+	Extra         map[string]yaml.Node
+	ManifestExtra map[string]yaml.Node
+	// Fetched are the files Options.Fetch named for the plugin, by the name it gave.
+	Fetched  map[string]Fetched
 	Versions []Version
 	Err      error
 }
@@ -301,6 +305,11 @@ type Options struct {
 	// entries, as manifest.ParseWith takes them; none refuses every key this package doesn't read.
 	// A host that lists plugins for another product passes manifest.AnyExtension.
 	Extensions manifest.Extensions
+	// Fetch names the files a listing and AtRelease read for a plugin, into its Fetched: each a path
+	// from the repository's root, read at the commit as the README is, or an https URL, fetched as
+	// a logo's URL is; each within MaxFetch bytes. The product joins a path its manifest gives with
+	// the plugin's Path.
+	Fetch func(Plugin) []string
 	// AllowLocal lets an untrusted URL be file:// or a local path, and a logo's URL reach a
 	// loopback address: for tests alone, as a local path reads the host's own files and loopback
 	// reaches its own services.
@@ -395,6 +404,10 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 			}
 
 			p.LogoData, p.LogoType, p.LogoErr, p.DarkLogoData, p.DarkLogoType, p.DarkLogoErr = g.logos(ctx, head, p.Logo, p.DarkLogo, version, opt)
+
+			if opt.Fetch != nil {
+				p.Fetched = g.fetched(ctx, head, version, opt.Fetch(p), opt)
+			}
 		}
 
 		out = append(out, p)
@@ -501,9 +514,11 @@ type Release struct {
 	DarkLogoData []byte
 	DarkLogoType string
 	DarkLogoErr  error
-	// Color is the background a listing gives the logo, and Extra the extra keys, as Plugin's.
-	Color manifest.Color
-	Extra map[string]yaml.Node
+	// Color is the background a listing gives the logo, Extra the extra keys and Fetched the files
+	// Options.Fetch named, as Plugin's; the manifest's own extra keys are Manifest.Extra.
+	Color   manifest.Color
+	Extra   map[string]yaml.Node
+	Fetched map[string]Fetched
 	// Readme is README.md in the plugin's directory at the commit, empty when there is none, and
 	// ReadmeErr says why it was refused: something other than a file, or over MaxReadme bytes. It
 	// is the plugin author's Markdown, and a host sanitizes it before rendering it.
@@ -579,9 +594,21 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
 			strings.TrimPrefix(version, "v"), opt)
 		rel.Readme, rel.ReadmeErr = g.readme(ctx, commit, r.Plugins[i].Path())
+		rel.Fetched = g.fetchedFor(ctx, commit, strings.TrimPrefix(version, "v"), p, rel, opt)
 	}
 
 	return rel, nil
+}
+
+// fetchedFor are the files opt.Fetch names for the release rel of p, read at commit.
+func (g *git) fetchedFor(ctx context.Context, commit, version string, p Plugin, rel Release, opt Options) map[string]Fetched {
+	if opt.Fetch == nil {
+		return nil
+	}
+
+	at := Plugin{Path: p.Path, Name: p.Name, Kind: p.Kind, Description: p.Description, Spec: rel.Manifest.Spec, Extra: rel.Extra, ManifestExtra: rel.Manifest.Extra}
+
+	return g.fetched(ctx, commit, version, opt.Fetch(at), opt)
 }
 
 // extraOf is m's extra keys with e's over them; nil when neither has any.
@@ -873,7 +900,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 	p.Logo, p.DarkLogo = logo.ForLight(), logo.ForDark()
 
 	p.Color = colorOf(e, m)
-	p.Extra = extraOf(e, m)
+	p.Extra, p.ManifestExtra = extraOf(e, m), m.Extra
 
 	return p, nil
 }

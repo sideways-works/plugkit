@@ -126,7 +126,7 @@ func fetchLogo(ctx context.Context, u, version string, opt Options) ([]byte, str
 		}
 	}
 
-	data, err := download(ctx, u, opt)
+	data, err := download(ctx, u, opt, MaxLogo)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, u, err)
 	}
@@ -144,7 +144,7 @@ func fetchLogo(ctx context.Context, u, version string, opt Options) ([]byte, str
 	return data, typ, nil
 }
 
-func download(ctx context.Context, u string, opt Options) ([]byte, error) {
+func download(ctx context.Context, u string, opt Options, limit int64) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, logoTimeout)
 	defer cancel()
 
@@ -162,17 +162,17 @@ func download(ctx context.Context, u string, opt Options) ([]byte, error) {
 	switch {
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("%w: %s", errStatus, resp.Status)
-	case resp.ContentLength > MaxLogo:
-		return nil, fmt.Errorf("%w: over %d bytes", errTooBig, MaxLogo)
+	case resp.ContentLength > limit:
+		return nil, fmt.Errorf("%w: over %d bytes", errTooBig, limit)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxLogo+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 
 	switch {
 	case err != nil:
 		return nil, err //nolint:wrapcheck // the caller says whose
-	case len(data) > MaxLogo:
-		return nil, fmt.Errorf("%w: over %d bytes", errTooBig, MaxLogo)
+	case int64(len(data)) > limit:
+		return nil, fmt.Errorf("%w: over %d bytes", errTooBig, limit)
 	}
 
 	return data, nil
@@ -180,7 +180,7 @@ func download(ctx context.Context, u string, opt Options) ([]byte, error) {
 
 var (
 	errStatus = errors.New("the server answered")
-	errTooBig = errors.New("the logo is too big")
+	errTooBig = errors.New("too big")
 )
 
 // keepFile writes data to p whole, by a rename.

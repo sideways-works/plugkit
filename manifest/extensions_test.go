@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestAnExtensionKeyIsTheProductsAndATypoIsRefused(t *testing.T) {
 	var checked []string
 
 	ext := Extensions{
-		"nodes": func(n *yaml.Node) error {
+		"nodes": {Check: func(n *yaml.Node) error {
 			checked = append(checked, "nodes")
 
 			if n.Kind != yaml.SequenceNode {
@@ -39,13 +40,13 @@ func TestAnExtensionKeyIsTheProductsAndATypoIsRefused(t *testing.T) {
 			}
 
 			return nil
-		},
-		"no_nodes": nil,
-		"logo": func(n *yaml.Node) error {
+		}},
+		"no_nodes": {},
+		"logo": {Check: func(n *yaml.Node) error {
 			checked = append(checked, "logo:"+n.Value)
 
 			return nil
-		},
+		}},
 	}
 
 	m, err := ParseWith([]byte(extended), ext)
@@ -90,5 +91,46 @@ func TestAMovingKeyIsInExtraAsWell(t *testing.T) {
 	m, err = Parse([]byte(strings.Replace(extended, "logo: logo.svg\nnodes:\n  - small\nno_nodes: true\n", "", 1)))
 	if err != nil || m.Extra != nil {
 		t.Fatalf("%+v %v", m.Extra, err)
+	}
+}
+
+// files names a scalar's value, or each of a list's.
+func files(n *yaml.Node) []string {
+	if n.Kind == yaml.ScalarNode {
+		return []string{n.Value}
+	}
+
+	var out []string
+	for _, c := range n.Content {
+		out = append(out, c.Value)
+	}
+
+	return out
+}
+
+func TestTheFilesAKeyNamesAreTheZipsAndPlugkitChecksThem(t *testing.T) {
+	ext := Extensions{"icons": {Files: files}}
+
+	head, _, _ := strings.Cut(extended, "logo:")
+
+	m, err := ParseWith([]byte(head+"icons: [icons/a.svg, b.png]\n"), ext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !slices.Equal(m.ExtraFiles, []string{"b.png", "icons/a.svg"}) || !slices.Equal(m.Extras(), []string{"b.png", "icons/a.svg"}) {
+		t.Fatalf("extra files %q, extras %q", m.ExtraFiles, m.Extras())
+	}
+
+	for name, c := range map[string]struct{ yaml, want string }{
+		"outside":     {head + "icons: [../x.svg]\n", `line 6: icons: file "../x.svg": a file of the plugin's directory`},
+		"a URL":       {head + "icons: [\"https://example.com/x.svg\"]\n", `icons: file "https://example.com/x.svg"`},
+		"the program": {head + "icons: [lint.mjs]\n", `"lint.mjs", a file a key names: lint.mjs is there too (the program)`},
+		"an asset":    {head + "assets: [web]\nicons: [web/x.svg]\n", `"web/x.svg", a file a key names: web is there too (assets: web)`},
+		"included":    {head + "include: [icons]\nicons: [icons/a.svg]\n", `include: "icons": icons/a.svg is there too (a file a key names)`},
+	} {
+		if _, err := ParseWith([]byte(c.yaml), ext); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

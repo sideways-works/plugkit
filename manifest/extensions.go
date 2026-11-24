@@ -7,26 +7,38 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Extensions are the keys a product adds to a manifest beyond the ones plugkit reads, each with
-// the check of its value, nil for none. A key that is neither plugkit's nor among them is refused
-// with its line, so a typo fails where the manifest is read. The product reads the values from
-// Extra and owns their meaning.
-type Extensions map[string]func(*yaml.Node) error
+// Extensions are the keys a product adds to a manifest beyond the ones plugkit reads. A key that
+// is neither plugkit's nor among them is refused with its line, so a typo fails where the manifest
+// is read. The product reads the values from Extra and owns their meaning.
+type Extensions map[string]Extension
+
+// Extension is one key of a product: Check checks its value, and Files names the files of the
+// plugin's directory the value names, which go into the zip under their own paths beside the
+// manifest, as ExtraFiles. plugkit checks each such path: relative to the plugin's directory,
+// without .. or ., and clear of the program, the files, the assets and include. Either may be nil.
+type Extension struct {
+	Check func(*yaml.Node) error
+	Files func(*yaml.Node) []string
+}
 
 // anyKey in Extensions accepts every key the others don't name.
 const anyKey = "*"
 
 // AnyExtension keeps every key plugkit doesn't read as it is, unchecked: for a host that lists
-// plugins and leaves their meaning to the product that runs them.
-var AnyExtension = Extensions{anyKey: nil} //nolint:gochecknoglobals // a value to pass, never changed
+// plugins and leaves their meaning to the product that runs them. It names no files, so it is for
+// listings, not for packing, unpacking or building a plugin whose keys name files.
+var AnyExtension = Extensions{anyKey: {}} //nolint:gochecknoglobals // a value to pass, never changed
 
 // Moving are the keys plugkit still reads into Manifest's fields and gives in Extra as well, while
 // the products move to reading them from there; plugkit stops reading them in a later version.
 var Moving = []string{"logo", "color", "spec", "schemas", "ack_timeout", "permissions"} //nolint:gochecknoglobals // a list to read
 
-// check refuses each key of extra that e doesn't accept, and each value its check refuses, in the
-// order of the keys; a moving key is plugkit's still, and checked by e only when e names it.
-func (e Extensions) check(extra map[string]yaml.Node, moving []string, lines map[string]int, add func(string, ...any)) {
+// check refuses each key of extra that e doesn't accept, each value its check refuses and each
+// file it names that is no path of the plugin's directory, in the order of the keys, and returns
+// the files; a moving key is plugkit's still, and checked by e only when e names it.
+func (e Extensions) check(extra map[string]yaml.Node, moving []string, lines map[string]int, add func(string, ...any)) []string {
+	var files []string
+
 	for _, k := range slices.Sorted(maps.Keys(extra)) {
 		n := extra[k]
 
@@ -43,14 +55,32 @@ func (e Extensions) check(extra map[string]yaml.Node, moving []string, lines map
 			}
 		}
 
-		if f == nil {
+		if f.Check != nil {
+			if err := f.Check(&n); err != nil {
+				add("line %d: %s: %v", lines[k], k, err)
+
+				continue
+			}
+		}
+
+		if f.Files == nil {
 			continue
 		}
 
-		if err := f(&n); err != nil {
-			add("line %d: %s: %v", lines[k], k, err)
+		for _, name := range f.Files(&n) {
+			if !localPath(name) {
+				add("line %d: %s: file %q: a file of the plugin's directory, relative, without .. or .", lines[k], k, name)
+
+				continue
+			}
+
+			files = append(files, name)
 		}
 	}
+
+	slices.Sort(files)
+
+	return slices.Compact(files)
 }
 
 // CheckMapping is e's check of m, a mapping such as a repository manifest's entry: extra are the

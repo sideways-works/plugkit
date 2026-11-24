@@ -75,6 +75,9 @@ type Manifest struct {
 	// Extra are the top-level keys plugkit doesn't read, which the Extensions given to ParseWith
 	// accept, and the Moving keys, each as its YAML holds it, lines and all. Nil when there are none.
 	Extra map[string]yaml.Node `yaml:"-"`
+	// ExtraFiles are the files of the plugin's directory the extensions' keys name, kept in the zip
+	// under their own paths beside the manifest, sorted.
+	ExtraFiles []string `yaml:"-"`
 }
 
 // document is a manifest as its YAML holds it: spec is read as a node, to convert to JSON, and the
@@ -204,7 +207,7 @@ func ParseWith(data []byte, ext Extensions) (Manifest, error) {
 
 	var refused []string
 
-	ext.check(m.Extra, Moving, lines, func(format string, args ...any) { refused = append(refused, fmt.Sprintf(format, args...)) })
+	m.ExtraFiles = ext.check(m.Extra, Moving, lines, func(format string, args ...any) { refused = append(refused, fmt.Sprintf(format, args...)) })
 
 	refused = append(refused, m.check()...)
 
@@ -268,6 +271,7 @@ func (m Manifest) check() []string {
 	}
 
 	m.checkLayout(add)
+	m.checkExtraFiles(add)
 
 	return bad
 }
@@ -295,7 +299,7 @@ func (m Manifest) checkInclude(add func(string, ...any)) {
 	}
 
 	for _, e := range m.Extras() {
-		taken[e] = "the logo or a schema"
+		taken[e] = "a file a key names"
 	}
 
 	for _, p := range m.ProgramFiles() {
@@ -323,6 +327,32 @@ func (m Manifest) checkInclude(add func(string, ...any)) {
 		}
 
 		seen = append(seen, inc)
+	}
+}
+
+// checkExtraFiles refuses a file a key names at or within the program, a top-level file or an
+// asset directory: the zip holds one thing at a path.
+func (m Manifest) checkExtraFiles(add func(string, ...any)) {
+	taken := map[string]string{}
+
+	for _, f := range m.Files {
+		taken[FileBase(f)] = "files: " + f
+	}
+
+	for _, a := range m.Assets {
+		taken[strings.TrimSuffix(a, "/")] = "assets: " + a
+	}
+
+	for _, p := range m.ProgramFiles() {
+		taken[p] = "the program"
+	}
+
+	for _, e := range m.ExtraFiles {
+		for _, at := range slices.Sorted(maps.Keys(taken)) {
+			if overlaps(at, e) {
+				add("%q, a file a key names: %s is there too (%s); a path comes from one place", e, at, taken[at])
+			}
+		}
 	}
 }
 
@@ -760,9 +790,9 @@ func (m Manifest) AnyPlatform() bool {
 }
 
 // Extras are the files of the plugin's directory kept under their own paths beside the manifest:
-// the logo, unless it is a URL, and a meta plugin's schemas.
+// the ones the extensions name, the logo, unless it is a URL, and a meta plugin's schemas.
 func (m Manifest) Extras() []string {
-	var out []string
+	out := slices.Clone(m.ExtraFiles)
 
 	for _, l := range m.Logo.Files() {
 		if !LogoURL(l) {

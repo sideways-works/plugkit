@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sideways-works/plugkit/manifest"
+	"go.yaml.in/yaml/v3"
 )
 
 // manifestText has comments and odd spacing, so only a byte-for-byte copy keeps it.
@@ -388,5 +389,42 @@ func TestAZipWithALightAndADarkLogoPacksAndUnpacks(t *testing.T) {
 	// packed again, the plugin is the same zip
 	if again := packed(t, dest); !bytes.Equal(again, data) {
 		t.Fatal("the unpacked plugin packs to other bytes")
+	}
+}
+
+func TestTheFilesAProductsKeyNamesPackAndUnpackWithItsExtensions(t *testing.T) {
+	text := manifestText + "icons: [icons/a.svg]\n"
+	ext := manifest.Extensions{"icons": {Files: func(n *yaml.Node) []string { return []string{n.Content[0].Value} }}}
+
+	entries := slices.Clone(plugin)
+	entries[0].body = text
+	entries = append(entries, entry{"icons/a.svg", 0o644, "<svg/>"})
+
+	dir := layout(t, entries...)
+
+	if err := Pack(dir, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "field icons not found") {
+		t.Fatalf("packed without the extensions: %v", err)
+	}
+
+	var b bytes.Buffer
+	if err := PackWith(dir, &b, ext); err != nil {
+		t.Fatal(err)
+	}
+
+	zipped := writeZip(t, b.Bytes())
+
+	if _, err := Unpack(zipped, filepath.Join(t.TempDir(), "plugin"), Limits{}); err == nil {
+		t.Fatal("unpacked without the extensions")
+	}
+
+	dest := filepath.Join(t.TempDir(), "plugin")
+
+	m, err := UnpackWith(zipped, dest, Limits{}, ext)
+	if err != nil || !slices.Equal(m.ExtraFiles, []string{"icons/a.svg"}) {
+		t.Fatalf("%+v %v", m.ExtraFiles, err)
+	}
+
+	if got, _ := os.ReadFile(filepath.Join(dest, "icons", "a.svg")); string(got) != "<svg/>" { //nolint:errcheck // compared
+		t.Fatalf("icons/a.svg: %q", got)
 	}
 }

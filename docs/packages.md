@@ -188,14 +188,25 @@ listed `Plugin` and a `Release` carry the one that applies as `Color`.
 
 plugkit reads only the keys its fetch, build, bundle and runner need; the
 rest of a manifest is the product's. `manifest.ParseWith(data, ext)` takes
-the product's `Extensions`, each key with the check of its value, keeps
-those keys in `Extra` as YAML nodes, lines and all, and refuses any other
-key with its line, so a typo still fails where the manifest is read.
-`AnyExtension` keeps every key unchecked, for a host that lists another
-product's plugins. `repository.Options`, `store.Store`, `build.Options`,
+the product's `Extensions`, each key an `Extension` with `Check`, the check
+of its value, and `Files`, the files of the plugin's directory the value
+names. It keeps those keys in `Extra` as YAML nodes, lines and all, the
+files in `ExtraFiles`, and refuses any other key with its line, so a typo
+still fails where the manifest is read. plugkit checks each file itself:
+relative to the plugin's directory, without `..` or `.`, and clear of the
+program, the files, the assets and `include`; the zip holds it under its
+own path, as it holds a logo. `AnyExtension` keeps every key unchecked and
+names no files, for a host that lists another product's plugins. `repository.Options`, `store.Store`, `build.Options`,
 `bundle.PackWith` and `bundle.UnpackWith` take the same extensions, and a
 repository manifest's entry takes them too: a listed `Plugin` and a
-`Release` give the manifest's `Extra` with the entry's over it. Without
+`Release` give the manifest's `Extra` with the entry's over it, and a
+`Plugin` its `ManifestExtra` too, since a path a manifest gives is from the
+plugin's directory and one an entry gives from the repository's root.
+`repository.Options.Fetch` names the files a listing and `AtRelease` read
+for a plugin into its `Fetched`, each with its content's media type or an
+error: a path from the repository's root, read at the commit as the README
+is (a file, its size read first, within 1 MiB), or an https URL, fetched
+as a logo's URL is. Without
 extensions, every key plugkit doesn't read is refused, as before. `logo`,
 `color`, `spec`, `schemas`, `ack_timeout` and `permissions` (the
 `manifest.Moving` keys) are still read into their fields and are in
