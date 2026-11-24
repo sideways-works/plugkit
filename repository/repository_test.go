@@ -606,3 +606,51 @@ func TestAListingReadsALightAndADarkLogo(t *testing.T) {
 		t.Fatalf("dark alone: %+v %v", got, err)
 	}
 }
+
+func TestAListingAndAReleaseGiveTheLogosColor(t *testing.T) {
+	r := newRepo(t)
+	r.commit(map[string]string{
+		"repository-manifest.yaml": "repository: 1\ntags: \"{path}/v{version}\"\nplugins:\n" +
+			"  - {manifest: step/a/manifest.yaml}\n  - {manifest: step/b/manifest.yaml, color: {dark: \"#101010\"}}\n",
+		"step/a/manifest.yaml": pluginManifest("a", "step", "A") + "color: {light: \"#ffffff\", dark: \"#000000\"}\n",
+		"step/b/manifest.yaml": pluginManifest("b", "step", "B") + "color: transparent\n",
+	})
+	r.git("tag", "step/a/v1.0.0")
+	r.git("tag", "step/b/v1.0.0")
+
+	url := r.bare()
+
+	got, err := List(context.Background(), url, Options{})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+
+	byName := map[string]manifest.Color{}
+	for _, p := range got {
+		byName[p.Name] = p.Color
+	}
+
+	a, b := manifest.Color{Light: "#ffffff", Dark: "#000000"}, manifest.Color{Dark: "#101010"}
+	if byName["a"] != a || byName["b"] != b || b.ForLight() != "#101010" {
+		t.Fatalf("listed %+v", byName)
+	}
+
+	for dir, want := range map[string]manifest.Color{"step/a": a, "step/b": b} {
+		rel, err := AtRelease(context.Background(), url, dir, "1.0.0", Options{})
+		if err != nil || rel.Color != want {
+			t.Fatalf("%s: %+v %v", dir, rel.Color, err)
+		}
+	}
+}
+
+func TestARepositoryManifestsColorIsChecked(t *testing.T) {
+	r := newRepo(t)
+	r.commit(map[string]string{
+		"repository-manifest.yaml": "repository: 1\nplugins:\n  - {manifest: step/a/manifest.yaml, color: {light: red}}\n",
+		"step/a/manifest.yaml":     pluginManifest("a", "step", "A"),
+	})
+
+	if _, err := List(context.Background(), r.bare(), Options{}); err == nil || !strings.Contains(err.Error(), `plugins[0].color.light "red"`) {
+		t.Fatalf("listed: %v", err)
+	}
+}

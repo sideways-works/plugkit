@@ -50,11 +50,12 @@ type Repository struct {
 // Entry is one plugin: its manifest, whose directory is its path, and what a listing shows of it;
 // empty fields take the plugin manifest's.
 type Entry struct {
-	Manifest    string        `yaml:"manifest"`
-	Name        string        `yaml:"name"`
-	Kind        string        `yaml:"kind"`
-	Description string        `yaml:"description"`
-	Logo        manifest.Logo `yaml:"logo"`
+	Manifest    string         `yaml:"manifest"`
+	Name        string         `yaml:"name"`
+	Kind        string         `yaml:"kind"`
+	Description string         `yaml:"description"`
+	Logo        manifest.Logo  `yaml:"logo"`
+	Color       manifest.Color `yaml:"color"`
 }
 
 // Path is the plugin's directory, "." for the repository's root.
@@ -67,8 +68,9 @@ const (
 )
 
 var (
-	relPath = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
-	holder  = regexp.MustCompile(`\{[^{}]*\}`)
+	hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+	relPath  = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
+	holder   = regexp.MustCompile(`\{[^{}]*\}`)
 )
 
 // Parse reads a repository manifest, refusing unknown keys, another format, a path that leaves the
@@ -138,6 +140,10 @@ func (r Repository) check() []string {
 			add("plugins[%d].logo.light %q: a file of the repository, without ..", i, e.Logo.Light)
 		case e.Logo.Dark != "" && !local(e.Logo.Dark):
 			add("plugins[%d].logo.dark %q: a file of the repository, without ..", i, e.Logo.Dark)
+		case e.Color.Light != "" && !hexColor.MatchString(e.Color.Light):
+			add("plugins[%d].color.light %q: a color as #rrggbb, six hex digits", i, e.Color.Light)
+		case e.Color.Dark != "" && !hexColor.MatchString(e.Color.Dark):
+			add("plugins[%d].color.dark %q: a color as #rrggbb, six hex digits", i, e.Color.Dark)
 		}
 
 		paths[e.Path()] = true
@@ -173,6 +179,9 @@ type Plugin struct {
 	DarkLogoData []byte
 	DarkLogoType string
 	DarkLogoErr  error
+	// Color is the background a listing gives the logo: the repository manifest's, or else the
+	// plugin manifest's, its ForLight and ForDark the color for each scheme.
+	Color manifest.Color
 	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
 	Spec     json.RawMessage
 	Versions []Version
@@ -321,7 +330,7 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 	p, err := g.plugin(ctx, commit, e)
 	if err != nil {
-		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Err: err}
+		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Color: e.Color, Err: err}
 	}
 
 	return p
@@ -415,6 +424,8 @@ type Release struct {
 	DarkLogoData []byte
 	DarkLogoType string
 	DarkLogoErr  error
+	// Color is the background a listing gives the logo, as Plugin's.
+	Color manifest.Color
 	// Readme is README.md in the plugin's directory at the commit, empty when there is none, and
 	// ReadmeErr says why it was refused: something other than a file, or over MaxReadme bytes. It
 	// is the plugin author's Markdown, and a host sanitizes it before rendering it.
@@ -484,7 +495,7 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 
 	logo := logoOf(r.Plugins[i], m)
 
-	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark()}
+	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark(), Color: colorOf(r.Plugins[i], m)}
 	if withLogo {
 		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
 			strings.TrimPrefix(version, "v"), opt)
@@ -492,6 +503,16 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 	}
 
 	return rel, nil
+}
+
+// colorOf is the color a listing gives e's logo: the repository manifest's, or else the plugin
+// manifest's.
+func colorOf(e Entry, m manifest.Manifest) manifest.Color {
+	if !e.Color.IsZero() {
+		return e.Color
+	}
+
+	return m.Color
 }
 
 // logoOf is the logo a listing shows of e: the repository manifest's, files named from the
@@ -754,6 +775,8 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 
 	logo := logoOf(e, m)
 	p.Logo, p.DarkLogo = logo.ForLight(), logo.ForDark()
+
+	p.Color = colorOf(e, m)
 
 	return p, nil
 }

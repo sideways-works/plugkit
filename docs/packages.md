@@ -183,6 +183,8 @@ for both. A repository manifest's entry takes `logo` in the same two forms.
 `color` is the background a listing gives the logo: `transparent`, or
 `{light: "#rrggbb", dark: "#rrggbb"}` with either alone standing in for
 both; how it contrasts with what is drawn on it is the listing's to judge.
+A repository manifest's entry takes `color` too, over the manifest's; a
+listed `Plugin` and a `Release` carry the one that applies as `Color`.
 A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 `schemas`, a JSON Schema file for each message and one for its answer, with
 an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
@@ -281,7 +283,7 @@ repository: 1                   # the format; another is refused
 tags: "{path}/v{version}"       # {name}, {path} and {version}; default {name}-v{version}
 plugins:
   - manifest: step/go-test/manifest.yaml   # its directory is the plugin's path
-    name: go-test                          # name, kind, description and logo default to the manifest's
+    name: go-test                          # name, kind, description, logo and color default to the manifest's
 ```
 
 ```go
