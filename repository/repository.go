@@ -402,8 +402,8 @@ func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Ma
 	return r.Manifest, r.Commit, err
 }
 
-// Release is a version of a plugin: its manifest and commit as At reads them, and its logos as a
-// listing gives them, LogoErr and DarkLogoErr saying why there is none.
+// Release is a version of a plugin: its manifest and commit as At reads them, its logos as a
+// listing gives them, LogoErr and DarkLogoErr saying why there is none, and its README.
 type Release struct {
 	Manifest     manifest.Manifest
 	Commit       string
@@ -415,10 +415,15 @@ type Release struct {
 	DarkLogoData []byte
 	DarkLogoType string
 	DarkLogoErr  error
+	// Readme is README.md in the plugin's directory at the commit, empty when there is none, and
+	// ReadmeErr says why it was refused: something other than a file, or over MaxReadme bytes. It
+	// is the plugin author's Markdown, and a host sanitizes it before rendering it.
+	Readme    []byte
+	ReadmeErr error
 }
 
-// AtRelease is At with the version's logo: a file of the repository at the version's commit, or
-// an https URL fetched as List fetches it.
+// AtRelease is At with the version's logo, a file of the repository at the version's commit or an
+// https URL fetched as List fetches it, and its README.
 func AtRelease(ctx context.Context, url, dir, version string, opt Options) (Release, error) {
 	return at(ctx, url, dir, version, opt, true)
 }
@@ -483,6 +488,7 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 	if withLogo {
 		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
 			strings.TrimPrefix(version, "v"), opt)
+		rel.Readme, rel.ReadmeErr = g.readme(ctx, commit, r.Plugins[i].Path())
 	}
 
 	return rel, nil

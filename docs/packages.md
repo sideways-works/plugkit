@@ -270,6 +270,12 @@ no SVG, PNG, JPEG or WebP image, sets `LogoErr` and never fails the plugin.
 An SVG logo, from a file or a URL, is the plugin author's markup: a host
 sanitizes it before rendering it.
 
+`AtRelease` also gives `Readme`, the `README.md` in the plugin's
+directory at the version's commit, empty when there is none. One that is
+no file (a directory or a link) or over 1 MiB sets `ReadmeErr` and never
+fails the release; its size is read before its content. It is the plugin
+author's Markdown: a host sanitizes it before rendering it.
+
 ```yaml
 repository: 1                   # the format; another is refused
 tags: "{path}/v{version}"       # {name}, {path} and {version}; default {name}-v{version}
