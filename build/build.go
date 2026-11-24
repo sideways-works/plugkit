@@ -56,11 +56,14 @@ type Options struct {
 	// does; otherwise Root is a git checkout, and build.copy and include copy the files its index
 	// tracks.
 	Tree bool
+	// Extensions are the product's keys of the manifest, as manifest.ParseWith takes them; none
+	// refuses every key plugkit doesn't read.
+	Extensions manifest.Extensions
 }
 
 // Build runs the manifest's command once per platform and lays the plugin out in o.Out.
 func Build(ctx context.Context, o Options) (manifest.Manifest, error) {
-	m, err := manifest.Parse(o.Manifest)
+	m, err := manifest.ParseWith(o.Manifest, o.Extensions)
 	if err != nil {
 		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBuild, err)
 	}
@@ -160,6 +163,8 @@ type LayoutOptions struct {
 	Tree      bool
 	Out       string
 	Scratch   map[string]string
+	// Extensions are as Options.Extensions.
+	Extensions manifest.Extensions
 }
 
 // Layout lays the plugin out in o.Out, which must not exist yet, exactly as Build does once its
@@ -168,7 +173,7 @@ type LayoutOptions struct {
 // of the first of the manifest's platforms, so the layout is Build's when the commands wrote what
 // Build's would. A plugin that builds nothing takes no scratch directory.
 func Layout(ctx context.Context, o LayoutOptions) (manifest.Manifest, error) {
-	m, err := manifest.Parse(o.Manifest)
+	m, err := manifest.ParseWith(o.Manifest, o.Extensions)
 	if err != nil {
 		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBuild, err)
 	}

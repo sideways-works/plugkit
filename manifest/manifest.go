@@ -72,13 +72,18 @@ type Manifest struct {
 	// Spec is the manifest's spec, a mapping for the host to read and check, as JSON; plugkit
 	// carries it and never looks into it. Empty when the manifest has none.
 	Spec json.RawMessage `yaml:"-"`
+	// Extra are the top-level keys plugkit doesn't read, which the Extensions given to ParseWith
+	// accept, and the Moving keys, each as its YAML holds it, lines and all. Nil when there are none.
+	Extra map[string]yaml.Node `yaml:"-"`
 }
 
-// document is a manifest as its YAML holds it: spec is read as a node, to convert to JSON.
+// document is a manifest as its YAML holds it: spec is read as a node, to convert to JSON, and the
+// keys plugkit doesn't read are kept to check against the extensions.
 type document struct {
 	Manifest `yaml:",inline"`
 
-	Spec yaml.Node `yaml:"spec"`
+	Spec  yaml.Node            `yaml:"spec"`
+	Extra map[string]yaml.Node `yaml:",inline"`
 }
 
 // Permission is one thing a plugin lets people do: its name (area:action), what it allows, and the
@@ -158,7 +163,11 @@ var (
 
 // Parse reads a manifest and refuses unknown keys, an image without a digest, placeholders
 // other than {out}, {os} and {arch}, and a spec that is no mapping JSON can say.
-func Parse(data []byte) (Manifest, error) {
+func Parse(data []byte) (Manifest, error) { return ParseWith(data, nil) }
+
+// ParseWith is Parse with a product's extensions: the keys they accept are kept in Extra, checked
+// by their checks, and every other key plugkit doesn't read is refused with its line.
+func ParseWith(data []byte, ext Extensions) (Manifest, error) {
 	var d document
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -186,7 +195,20 @@ func Parse(data []byte) (Manifest, error) {
 
 	m.Spec = spec
 
-	if problems := m.check(); len(problems) > 0 {
+	extra, lines, err := extraOf(data, d.Extra)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%w: %w", ErrManifest, err)
+	}
+
+	m.Extra = extra
+
+	var refused []string
+
+	ext.check(m.Extra, Moving, lines, func(format string, args ...any) { refused = append(refused, fmt.Sprintf(format, args...)) })
+
+	refused = append(refused, m.check()...)
+
+	if problems := refused; len(problems) > 0 {
 		return Manifest{}, fmt.Errorf("%w: %s", ErrManifest, strings.Join(problems, "; "))
 	}
 

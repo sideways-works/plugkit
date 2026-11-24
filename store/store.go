@@ -77,6 +77,9 @@ type Store struct {
 	// GitEnv is added to git's environment, for credentials the host gives git.
 	GitEnv []string
 	Limits bundle.Limits
+	// Extensions are the product's keys of the plugins' manifests, as manifest.ParseWith takes
+	// them; none refuses every key plugkit doesn't read.
+	Extensions manifest.Extensions
 	// OnBuild, when set, is called with the key of each build before it starts.
 	OnBuild func(key string)
 	// Untrusted is for a pin from someone the host doesn't trust: as repository.Options.Untrusted,
@@ -165,7 +168,7 @@ func (s Store) zip(ctx context.Context, z Zip, osArch string) (Resolved, error) 
 	}
 
 	if err := s.keep(entry, func(tmp string) error {
-		_, err := bundle.Unpack(file, tmp, s.Limits)
+		_, err := bundle.UnpackWith(file, tmp, s.Limits, s.Extensions)
 
 		return err
 	}); err != nil {
@@ -258,7 +261,7 @@ func (s Store) commit(ctx context.Context, p Pin, osArch string) (Resolved, erro
 		return Resolved{}, fmt.Errorf("%w: %s at %s: %w", ErrNoManifest, p.Repository, p.Commit, err)
 	}
 
-	m, err := manifest.Parse(data)
+	m, err := manifest.ParseWith(data, s.Extensions)
 	if err != nil {
 		return Resolved{}, fmt.Errorf("%w: %s at %s: %s: %w", ErrPin, p.Repository, p.Commit, file, err)
 	}
@@ -325,7 +328,7 @@ func (s Store) build(ctx context.Context, mirror string, p Pin, data []byte, pla
 
 		_, err := build.Build(ctx, build.Options{
 			Tool: s.Tool, Root: src, Dir: p.Path, Manifest: data, Platforms: platforms, Out: tmp, Log: s.Log,
-			Commit: p.Commit, Version: strings.TrimPrefix(p.Version, "v"), Tree: true,
+			Commit: p.Commit, Version: strings.TrimPrefix(p.Version, "v"), Tree: true, Extensions: s.Extensions,
 		})
 
 		return err
@@ -369,7 +372,7 @@ func (s Store) found(entry, osArch string) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("%w: %w", ErrPin, os.ErrNotExist)
 	}
 
-	m, err := manifest.Parse(data)
+	m, err := manifest.ParseWith(data, s.Extensions)
 	if err != nil {
 		return Resolved{}, fmt.Errorf("%w: %s: %w", ErrPin, entry, err)
 	}

@@ -111,8 +111,12 @@ var fixedTime = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // Pack writes the plugin laid out in dir as a zip to w: its entries sorted, each with a fixed time
 // and with the mode its role gives, so the same files always make the same zip.
-func Pack(dir string, w io.Writer) error {
-	m, _, err := readManifest(dir)
+func Pack(dir string, w io.Writer) error { return PackWith(dir, w, nil) }
+
+// PackWith is Pack of a plugin whose manifest has a product's extension keys, as
+// manifest.ParseWith takes them.
+func PackWith(dir string, w io.Writer, ext manifest.Extensions) error {
+	m, _, err := readManifest(dir, ext)
 	if err != nil {
 		return err
 	}
@@ -218,13 +222,13 @@ func readIn(dir string) func(string) ([]byte, error) {
 	}
 }
 
-func readManifest(dir string) (manifest.Manifest, []byte, error) {
+func readManifest(dir string, ext manifest.Extensions) (manifest.Manifest, []byte, error) {
 	data, err := os.ReadFile(filepath.Join(dir, manifest.FileName)) //nolint:gosec // the plugin's own manifest
 	if err != nil {
 		return manifest.Manifest{}, nil, fmt.Errorf("%w: %w", ErrBundle, err)
 	}
 
-	m, err := manifest.Parse(data)
+	m, err := manifest.ParseWith(data, ext)
 	if err != nil {
 		return manifest.Manifest{}, nil, fmt.Errorf("%w: %w", ErrBundle, err)
 	}
@@ -237,6 +241,12 @@ func readManifest(dir string) (manifest.Manifest, []byte, error) {
 // none executable but the program, and all within limits. On an error dest may hold part of it;
 // the caller unpacks into a directory of its own and removes it.
 func Unpack(file, dest string, limits Limits) (manifest.Manifest, error) {
+	return UnpackWith(file, dest, limits, nil)
+}
+
+// UnpackWith is Unpack of a plugin whose manifest has a product's extension keys, as
+// manifest.ParseWith takes them.
+func UnpackWith(file, dest string, limits Limits, ext manifest.Extensions) (manifest.Manifest, error) {
 	if limits.Bytes <= 0 {
 		limits.Bytes = DefaultLimits.Bytes
 	}
@@ -251,7 +261,7 @@ func Unpack(file, dest string, limits Limits) (manifest.Manifest, error) {
 		return manifest.Manifest{}, fmt.Errorf("%w: %d entries, more than %d", ErrBundle, len(zr.File), limits.Entries)
 	}
 
-	m, err := topManifest(zr.File, limits)
+	m, err := topManifest(zr.File, limits, ext)
 	if err != nil {
 		return manifest.Manifest{}, err
 	}
@@ -340,7 +350,7 @@ func safeName(name string) bool {
 }
 
 // topManifest is the manifest at the zip's top level; one only deeper down gets its own error.
-func topManifest(files []*zip.File, limits Limits) (manifest.Manifest, error) {
+func topManifest(files []*zip.File, limits Limits, ext manifest.Extensions) (manifest.Manifest, error) {
 	var deeper string
 
 	for _, f := range files {
@@ -351,7 +361,7 @@ func topManifest(files []*zip.File, limits Limits) (manifest.Manifest, error) {
 				return manifest.Manifest{}, err
 			}
 
-			m, err := manifest.Parse(data)
+			m, err := manifest.ParseWith(data, ext)
 			if err != nil {
 				return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBundle, err)
 			}

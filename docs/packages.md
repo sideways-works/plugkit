@@ -185,6 +185,22 @@ for both. A repository manifest's entry takes `logo` in the same two forms.
 both; how it contrasts with what is drawn on it is the listing's to judge.
 A repository manifest's entry takes `color` too, over the manifest's; a
 listed `Plugin` and a `Release` carry the one that applies as `Color`.
+
+plugkit reads only the keys its fetch, build, bundle and runner need; the
+rest of a manifest is the product's. `manifest.ParseWith(data, ext)` takes
+the product's `Extensions`, each key with the check of its value, keeps
+those keys in `Extra` as YAML nodes, lines and all, and refuses any other
+key with its line, so a typo still fails where the manifest is read.
+`AnyExtension` keeps every key unchecked, for a host that lists another
+product's plugins. `repository.Options`, `store.Store`, `build.Options`,
+`bundle.PackWith` and `bundle.UnpackWith` take the same extensions, and a
+repository manifest's entry takes them too: a listed `Plugin` and a
+`Release` give the manifest's `Extra` with the entry's over it. Without
+extensions, every key plugkit doesn't read is refused, as before. `logo`,
+`color`, `spec`, `schemas`, `ack_timeout` and `permissions` (the
+`manifest.Moving` keys) are still read into their fields and are in
+`Extra` as well, until the products read them from there; a later
+version stops reading them.
 A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 `schemas`, a JSON Schema file for each message and one for its answer, with
 an optional `ack_timeout`, the Go duration a receiver has to ack or nack a

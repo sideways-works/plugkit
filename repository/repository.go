@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -56,7 +57,13 @@ type Entry struct {
 	Description string         `yaml:"description"`
 	Logo        manifest.Logo  `yaml:"logo"`
 	Color       manifest.Color `yaml:"color"`
+	// Extra are the keys this package doesn't read, which the extensions accept, and the moving
+	// ones, logo and color, as the YAML holds them.
+	Extra map[string]yaml.Node `yaml:",inline"`
 }
+
+// entryMoving are an entry's keys this package still reads and gives in Extra as well.
+var entryMoving = []string{"logo", "color"} //nolint:gochecknoglobals // a list to read
 
 // Path is the plugin's directory, "." for the repository's root.
 func (e Entry) Path() string { return path.Dir(e.Manifest) }
@@ -75,7 +82,12 @@ var (
 
 // Parse reads a repository manifest, refusing unknown keys, another format, a path that leaves the
 // repository, a plugin listed twice and a placeholder other than {name}, {path} and {version}.
-func Parse(data []byte) (Repository, error) {
+func Parse(data []byte) (Repository, error) { return ParseWith(data, nil) }
+
+// ParseWith is Parse with a product's extensions for the entries: the keys they accept are kept in
+// each entry's Extra, checked by their checks, and every other key this package doesn't read is
+// refused with its line.
+func ParseWith(data []byte, ext manifest.Extensions) (Repository, error) {
 	var r Repository
 
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -87,6 +99,10 @@ func Parse(data []byte) (Repository, error) {
 		}
 
 		return Repository{}, fmt.Errorf("%w: %w", ErrRepository, err)
+	}
+
+	if err := entryExtra(r.Plugins, data, ext); err != nil {
+		return Repository{}, err
 	}
 
 	if r.Tags == "" {
@@ -101,6 +117,60 @@ func Parse(data []byte) (Repository, error) {
 	}
 
 	return r, nil
+}
+
+// entryExtra checks each entry's extra keys against ext and adds its moving keys to its Extra.
+func entryExtra(plugins []Entry, data []byte, ext manifest.Extensions) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return fmt.Errorf("%w: %w", ErrRepository, err)
+	}
+
+	var entries []*yaml.Node
+
+	if len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode {
+		top := doc.Content[0]
+		for i := 0; i+1 < len(top.Content); i += 2 {
+			if top.Content[i].Value == "plugins" && top.Content[i+1].Kind == yaml.SequenceNode {
+				entries = top.Content[i+1].Content
+			}
+		}
+	}
+
+	var bad []string
+
+	for i := range plugins {
+		var n *yaml.Node
+		if i < len(entries) {
+			n = entries[i]
+		}
+
+		e := &plugins[i]
+
+		ext.CheckMapping(n, e.Extra, func(format string, args ...any) {
+			bad = append(bad, fmt.Sprintf("plugins[%d]: ", i)+fmt.Sprintf(format, args...))
+		})
+
+		if n == nil || n.Kind != yaml.MappingNode {
+			continue
+		}
+
+		for j := 0; j+1 < len(n.Content); j += 2 {
+			if k := n.Content[j].Value; slices.Contains(entryMoving, k) {
+				if e.Extra == nil {
+					e.Extra = map[string]yaml.Node{}
+				}
+
+				e.Extra[k] = *n.Content[j+1]
+			}
+		}
+	}
+
+	if len(bad) > 0 {
+		return fmt.Errorf("%w: %s", ErrRepository, strings.Join(bad, "; "))
+	}
+
+	return nil
 }
 
 func (r Repository) check() []string {
@@ -183,7 +253,10 @@ type Plugin struct {
 	// plugin manifest's, its ForLight and ForDark the color for each scheme.
 	Color manifest.Color
 	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
-	Spec     json.RawMessage
+	Spec json.RawMessage
+	// Extra are the plugin manifest's extra keys with the repository manifest entry's over them,
+	// as the YAML holds them: the product's to read.
+	Extra    map[string]yaml.Node
 	Versions []Version
 	Err      error
 }
@@ -224,6 +297,10 @@ type Options struct {
 	MaxBytes int64
 	// Commit is the commit At must find the version's tag naming, when the caller knows it.
 	Commit string
+	// Extensions are the product's keys of plugin manifests and of the repository manifest's
+	// entries, as manifest.ParseWith takes them; none refuses every key this package doesn't read.
+	// A host that lists plugins for another product passes manifest.AnyExtension.
+	Extensions manifest.Extensions
 	// AllowLocal lets an untrusted URL be file:// or a local path, and a logo's URL reach a
 	// loopback address: for tests alone, as a local path reads the host's own files and loopback
 	// reaches its own services.
@@ -330,7 +407,7 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 	p, err := g.plugin(ctx, commit, e)
 	if err != nil {
-		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Color: e.Color, Err: err}
+		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Color: e.Color, Extra: e.Extra, Err: err}
 	}
 
 	return p
@@ -424,8 +501,9 @@ type Release struct {
 	DarkLogoData []byte
 	DarkLogoType string
 	DarkLogoErr  error
-	// Color is the background a listing gives the logo, as Plugin's.
+	// Color is the background a listing gives the logo, and Extra the extra keys, as Plugin's.
 	Color manifest.Color
+	Extra map[string]yaml.Node
 	// Readme is README.md in the plugin's directory at the commit, empty when there is none, and
 	// ReadmeErr says why it was refused: something other than a file, or over MaxReadme bytes. It
 	// is the plugin author's Markdown, and a host sanitizes it before rendering it.
@@ -495,7 +573,8 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 
 	logo := logoOf(r.Plugins[i], m)
 
-	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark(), Color: colorOf(r.Plugins[i], m)}
+	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark(), Color: colorOf(r.Plugins[i], m),
+		Extra: extraOf(r.Plugins[i], m)}
 	if withLogo {
 		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
 			strings.TrimPrefix(version, "v"), opt)
@@ -503,6 +582,22 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 	}
 
 	return rel, nil
+}
+
+// extraOf is m's extra keys with e's over them; nil when neither has any.
+func extraOf(e Entry, m manifest.Manifest) map[string]yaml.Node {
+	if len(e.Extra) == 0 {
+		return m.Extra
+	}
+
+	out := maps.Clone(m.Extra)
+	if out == nil {
+		out = map[string]yaml.Node{}
+	}
+
+	maps.Copy(out, e.Extra)
+
+	return out
 }
 
 // colorOf is the color a listing gives e's logo: the repository manifest's, or else the plugin
@@ -584,6 +679,7 @@ type git struct {
 	dir, repo string
 	env       []string
 	maxBytes  int64
+	ext       manifest.Extensions
 }
 
 func newGit(ctx context.Context, url string, opt Options) (*git, error) {
@@ -592,7 +688,7 @@ func newGit(ctx context.Context, url string, opt Options) (*git, error) {
 		return nil, fmt.Errorf("%w: %w", ErrRepository, err)
 	}
 
-	g := &git{dir: dir, repo: filepath.Join(dir, "repo"), maxBytes: opt.MaxBytes}
+	g := &git{dir: dir, repo: filepath.Join(dir, "repo"), maxBytes: opt.MaxBytes, ext: opt.Extensions}
 
 	if opt.Untrusted {
 		home := filepath.Join(dir, "home")
@@ -710,7 +806,7 @@ func (g *git) repository(ctx context.Context, commit string) (Repository, error)
 			return Repository{}, err
 		}
 
-		return Parse(data)
+		return ParseWith(data, g.ext)
 	}
 
 	data, ok, err := g.file(ctx, commit, manifest.FileName)
@@ -728,7 +824,7 @@ func (g *git) repository(ctx context.Context, commit string) (Repository, error)
 	}
 
 	if _, many := keys["plugins"]; many {
-		return Parse(data)
+		return ParseWith(data, g.ext)
 	}
 
 	return Repository{Format: Format, Tags: singleTags, Plugins: []Entry{{Manifest: manifest.FileName}}}, nil
@@ -744,7 +840,7 @@ func (g *git) manifest(ctx context.Context, commit, name string) (manifest.Manif
 		return manifest.Manifest{}, fmt.Errorf("%w: no %s at %s", ErrRepository, name, commit)
 	}
 
-	m, err := manifest.Parse(data)
+	m, err := manifest.ParseWith(data, g.ext)
 	if err != nil {
 		return manifest.Manifest{}, fmt.Errorf("%w: %s: %w", ErrRepository, name, err)
 	}
@@ -777,6 +873,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 	p.Logo, p.DarkLogo = logo.ForLight(), logo.ForDark()
 
 	p.Color = colorOf(e, m)
+	p.Extra = extraOf(e, m)
 
 	return p, nil
 }
