@@ -233,10 +233,10 @@ func (b builder) layout(ctx context.Context, platforms []string, scratch map[str
 		return err
 	}
 
-	if err := manifest.CheckSchemas(b.m, func(f string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(b.o.Out, filepath.FromSlash(f)))
-	}); err != nil {
-		return fmt.Errorf("%w: %w", ErrBuild, err)
+	for _, e := range b.m.Extras() {
+		if info, err := os.Lstat(filepath.Join(b.o.Out, filepath.FromSlash(e))); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: no file %s, which a key of the manifest names", ErrBuild, e)
+		}
 	}
 
 	if err := os.WriteFile(filepath.Join(b.o.Out, manifest.FileName), b.o.Manifest, 0o644); err != nil { //nolint:gosec // a plugin's files are readable

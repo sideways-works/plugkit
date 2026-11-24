@@ -15,7 +15,7 @@ func TestAListingGivesTheProductsKeysOfManifestAndEntry(t *testing.T) {
 	r := newRepo(t)
 	r.commit(map[string]string{
 		"repository-manifest.yaml": "repository: 1\ntags: \"{path}/v{version}\"\nplugins:\n" +
-			"  - manifest: step/a/manifest.yaml\n    nodes: [big]\n    color: transparent\n",
+			"  - manifest: step/a/manifest.yaml\n    nodes: [big]\n",
 		"step/a/manifest.yaml": pluginManifest("a", "step", "A") + "nodes: [small]\nno_nodes: false\n",
 	})
 	r.git("tag", "step/a/v1.0.0")
@@ -37,8 +37,8 @@ func TestAListingGivesTheProductsKeysOfManifestAndEntry(t *testing.T) {
 	p := got[0]
 
 	nodes := p.Extra["nodes"]
-	if len(nodes.Content) != 1 || nodes.Content[0].Value != "big" || p.Extra["no_nodes"].Value != "false" ||
-		p.Extra["color"].Value != "transparent" || p.Extra["logo"].Value != "logo.svg" || !p.Color.Transparent {
+	if len(nodes.Content) != 1 || nodes.Content[0].Value != "big" || p.Extra["no_nodes"].Value != "false" || len(p.Extra) != 2 ||
+		p.ManifestExtra["nodes"].Content[0].Value != "small" {
 		t.Fatalf("extra %+v", p.Extra)
 	}
 

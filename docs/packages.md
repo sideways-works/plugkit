@@ -174,77 +174,51 @@ r, err := s.Resolve(ctx, store.Pin{Zip: &store.Zip{URL: url, SHA256: sum}}, "lin
 
 ## More of the manifest
 
-A plugin manifest may also carry what a listing shows, `description` and
-`logo` (a file of the plugin's directory, or an `https://` URL), and what the plugin offers and
-needs, `implements` and `requires`, each a list of `"<name> <semver range>"`.
-`logo` is one image for both color schemes, or one for each:
-`logo: {light: logo.svg, dark: logo-dark.svg}`, either alone standing in
-for both. A repository manifest's entry takes `logo` in the same two forms.
-`color` is the background a listing gives the logo: `transparent`, or
-`{light: "#rrggbb", dark: "#rrggbb"}` with either alone standing in for
-both; how it contrasts with what is drawn on it is the listing's to judge.
-A repository manifest's entry takes `color` too, over the manifest's; a
-listed `Plugin` and a `Release` carry the one that applies as `Color`.
+plugkit reads only the keys its fetch, build, bundle and runner need:
+`name`, `kind`, `program`, `runtime`, `build`, `platforms`, `files`,
+`assets` and `include`, and `description`, `implements` and `requires`, the
+last two each a list of `"<name> <semver range>"`. Every other key is the
+product's: a logo, a color, a spec, a meta plugin's schemas, permissions,
+whatever the product's plugins say. plugkit never reads their meaning.
 
-plugkit reads only the keys its fetch, build, bundle and runner need; the
-rest of a manifest is the product's. `manifest.ParseWith(data, ext)` takes
-the product's `Extensions`, each key an `Extension` with `Check`, the check
-of its value, and `Files`, the files of the plugin's directory the value
-names. It keeps those keys in `Extra` as YAML nodes, lines and all, the
-files in `ExtraFiles`, and refuses any other key with its line, so a typo
-still fails where the manifest is read. plugkit checks each file itself:
-relative to the plugin's directory, without `..` or `.`, and clear of the
-program, the files, the assets and `include`; the zip holds it under its
-own path, as it holds a logo. `AnyExtension` keeps every key unchecked and
-names no files, for a host that lists another product's plugins. `repository.Options`, `store.Store`, `build.Options`,
-`bundle.PackWith` and `bundle.UnpackWith` take the same extensions, and a
-repository manifest's entry takes them too: a listed `Plugin` and a
-`Release` give the manifest's `Extra` with the entry's over it, and a
-`Plugin` its `ManifestExtra` too, since a path a manifest gives is from the
-plugin's directory and one an entry gives from the repository's root.
-`repository.Options.Fetch` names the files a listing and `AtRelease` read
-for a plugin into its `Fetched`, each with its content's media type or an
-error: a path from the repository's root, read at the commit as the README
-is (a file, its size read first, within 1 MiB), or an https URL, fetched
-as a logo's URL is. Without
-extensions, every key plugkit doesn't read is refused, as before. `logo`,
-`color`, `spec`, `schemas`, `ack_timeout` and `permissions` (the
-`manifest.Moving` keys) are still read into their fields and are in
-`Extra` as well, until the products read them from there; a later
-version stops reading them.
-A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
-`schemas`, a JSON Schema file for each message and one for its answer, with
-an optional `ack_timeout`, the Go duration a receiver has to ack or nack a
-message. It resolves to its directory as a plugin built for `[any]` does,
-and nothing of it is built.
+`manifest.ParseWith(data, ext)` takes the product's `Extensions`, each key
+an `Extension` with `Check`, the check of its value, and `Files`, the files
+of the plugin's directory the value names. It keeps those keys in `Extra`
+as YAML nodes, lines and all, the files in `ExtraFiles`, and refuses any
+other key with its line, so a typo still fails where the manifest is read.
+`Parse` takes no extensions and refuses every key plugkit doesn't read.
+plugkit checks each file a key names itself: relative to the plugin's
+directory, without `..` or `.`, and clear of the program, the files, the
+assets and `include`. The zip holds it under its own path beside the
+manifest; a pack, an unpack and a build refuse a plugin that lacks one.
+`AnyExtension` keeps every key unchecked and names no files, for a host
+that lists another product's plugins. `repository.Options`, `store.Store`,
+`build.Options`, `bundle.PackWith` and `bundle.UnpackWith` take the same
+extensions, and a repository manifest's entry takes them too.
+
+A plugin of kind `meta` builds nothing: no `build` and no `program`, the
+same on every platform (`[any]` or none), and no `assets`. It holds the
+files its keys name and the paths it includes, and resolves to its
+directory as a plugin built for `[any]` does.
 
 A manifest may `include` files and directories of the plugin's directory,
 `include: [service.yaml, conf/]`. They are copied as they are into the
 resolved plugin, under their paths relative to the plugin's directory, and
 packed at those paths in its zip beside `manifest.yaml`. Each path is
 relative, without `..` or `.`, and none may be another's, lie within one, or
-meet a path the plugin holds otherwise (its `files`, `assets`, `logo`,
-schemas or program). The files come from what git tracks: a pinned commit's
-tree, or of a checkout the files its index lists, each as the checkout
-holds it, so untracked and ignored files never get in. A symlink anywhere
-on a path, an executable file, and an included path with no tracked file
-are refused, each by its path. A plugin with no program may include paths
-with no `build` at all: nothing runs and no image is pulled, so it resolves
-without docker or podman. Beside a build, the build runs first and the
-included paths are copied after it. A plugin with no program, no assets and
-no included path delivers nothing and is refused; a `meta` plugin still
-needs neither. A zip whose manifest includes a path it holds no file of is
-refused. The cache keeps an included plugin of a commit under the commit,
-like any build.
-
-A manifest's optional `spec` is a mapping for the host: plugkit carries it
-and never looks into it. `Manifest.Spec` holds it as JSON with its keys
-sorted, so a host reads one form; `repository.List` gives each plugin the
-default branch's (`Plugin.Spec`), `At` the version's, and the zip and the
-store keep it with the manifest's bytes. A spec that is no mapping, that
-JSON can't say (an anchor or alias, a merge key, a key that is no string or
-is there twice, a tag of its own, an infinite or NaN number), or that is
-over 64 KiB as JSON is refused.
+meet a path the plugin holds otherwise (its `files`, `assets`, a file a key
+names, or the program). The files come from what git tracks: a pinned
+commit's tree, or of a checkout the files its index lists, each as the
+checkout holds it, so untracked and ignored files never get in. A symlink
+anywhere on a path, an executable file, and an included path with no
+tracked file are refused, each by its path. A plugin with no program may
+include paths with no `build` at all: nothing runs and no image is pulled,
+so it resolves without docker or podman. Beside a build, the build runs
+first and the included paths are copied after it. A plugin with no program,
+no assets and no included path delivers nothing and is refused; a `meta`
+plugin still needs neither. A zip whose manifest includes a path it holds
+no file of is refused. The cache keeps an included plugin of a commit under
+the commit, like any build.
 
 A manifest's optional `runtime` says what runs the program besides the
 machine, with an optional semver range: `node` or `"node >=22 <27"` for a
@@ -262,12 +236,6 @@ runtime:
   native: true
 ```
 
-A manifest of any kind may list its `permissions`, what the plugin lets
-people do: each a `name` (`area:action`, lower-case letters and dashes,
-unique), a `description`, and the least role that holds it by `default`,
-one of `display`, `viewer`, `operator`, `maintainer` and `admin`. A host
-grants and checks them; the manifest only declares them.
-
 ## repository
 
 `repository` reads what a plugin repository holds, from
@@ -279,38 +247,42 @@ A repository with neither file at its root but a plugin's `manifest.yaml`
 is that one plugin, at `.`, tagged `v{version}`. A plugin whose manifest
 doesn't read is listed with its `Err`, and the others as they are; only a
 repository manifest that doesn't read fails the listing. Each version
-names its tag and commit, and a plugin its logo's bytes when it is an SVG,
-PNG, JPEG or WebP image of at most 256 KiB, by its content. `At` reads a
-version's manifest at the commit its tag names, and refuses a tag that
-names another commit when read again after the fetch, or another than
-`Options.Commit`.
+names its tag and commit. `At` reads a version's manifest at the commit its
+tag names, and refuses a tag that names another commit when read again
+after the fetch, or another than `Options.Commit`.
 
-A logo given as a URL is fetched by `List` and `AtRelease` (`At` with the
-version's logo), so a host gets `LogoData` and `LogoType`, and for a dark
-color scheme `DarkLogoData` and `DarkLogoType`, and fetches nothing itself. Manifests are untrusted, so the fetch is https alone, with
-no credential, cookie, proxy or redirect, within 10 seconds and 256 KiB,
-and its dialer refuses every loopback, private, link-local (169.254.169.254
-among them), CGNAT, unspecified, multicast and reserved address, checked
-at connect time on the address the name resolved to, so a name that
-resolves elsewhere the second time gets no further. `Options.LogoCache`, a
-directory, keeps each fetched logo by its URL and the plugin's version;
-without one, every listing fetches again. A logo that fails to fetch, or is
-no SVG, PNG, JPEG or WebP image, sets `LogoErr` and never fails the plugin.
-An SVG logo, from a file or a URL, is the plugin author's markup: a host
-sanitizes it before rendering it.
+A listed `Plugin` and a `Release` give the manifest's `Extra` with the
+entry's over it, and a `Plugin` its `ManifestExtra` alone too: a path a
+manifest gives is from the plugin's directory, one an entry gives from the
+repository's root, and the product joins them with `Plugin.Path`.
+
+`Options.Fetch` names the files `List` and `AtRelease` read for a plugin,
+so a host gets their bytes, in `Fetched`, and fetches nothing itself. Each
+name is a path from the repository's root, read at the commit (a file,
+never a link or a directory, its size read before its content), or an
+https URL. Manifests are untrusted, so a URL is fetched over https alone,
+with no credential, cookie, proxy or redirect, within 10 seconds, and its
+dialer refuses every loopback, private, link-local (169.254.169.254 among
+them), CGNAT, unspecified, multicast and reserved address, checked at
+connect time on the address the name resolved to, so a name that resolves
+elsewhere the second time gets no further. Each file is at most 1 MiB and
+comes with its media type by its content; one that fails sets its `Err`
+and never fails the plugin. `Options.FetchCache`, a directory, keeps each
+fetched URL by the URL and the plugin's version; without one, every listing
+fetches again. A file is the plugin author's: a host sanitizes an SVG or
+Markdown before rendering it.
 
 `AtRelease` also gives `Readme`, the `README.md` in the plugin's
 directory at the version's commit, empty when there is none. One that is
 no file (a directory or a link) or over 1 MiB sets `ReadmeErr` and never
-fails the release; its size is read before its content. It is the plugin
-author's Markdown: a host sanitizes it before rendering it.
+fails the release; its size is read before its content.
 
 ```yaml
 repository: 1                   # the format; another is refused
 tags: "{path}/v{version}"       # {name}, {path} and {version}; default {name}-v{version}
 plugins:
   - manifest: step/go-test/manifest.yaml   # its directory is the plugin's path
-    name: go-test                          # name, kind, description, logo and color default to the manifest's
+    name: go-test                          # name, kind and description default to the manifest's
 ```
 
 ```go

@@ -22,7 +22,7 @@ import (
 const image = "golang@sha256:564e366a28ad1d70f460a2b97d1d299a562f08707eb0ecb24b659e5bd6c108e1"
 
 func pluginManifest(name, kind, description string) string {
-	return "name: " + name + "\nkind: " + kind + "\nprogram: " + name + "\ndescription: " + description + "\nlogo: logo.svg\n" +
+	return "name: " + name + "\nkind: " + kind + "\nprogram: " + name + "\ndescription: " + description + "\n" +
 		"build: {image: \"" + image + "\", run: [go, build, -o, \"{out}/" + name + "\", .]}\nplatforms: [linux/amd64]\n"
 }
 
@@ -125,7 +125,7 @@ func TestAMonorepoListsEachPluginWithItsTags(t *testing.T) {
 	goTest, x := got[0], got[1]
 
 	switch {
-	case goTest.Path != "step/go-test" || goTest.Name != "go-test" || goTest.Kind != "step" || goTest.Description != "Runs go test" || goTest.Logo != "step/go-test/logo.svg":
+	case goTest.Path != "step/go-test" || goTest.Name != "go-test" || goTest.Kind != "step" || goTest.Description != "Runs go test":
 		t.Fatalf("go-test: %+v", goTest)
 	case x.Name != "x-sbom" || x.Description != "Lists x" || x.Kind != "sbom":
 		t.Fatalf("x: %+v", x)
@@ -225,7 +225,6 @@ func TestRepositoryManifestsAreRefused(t *testing.T) {
 		"another file":           {"a/manifest.yaml", "a/plugin.yaml", "a manifest.yaml"},
 		"a path twice":           {"b/manifest.yaml", "a/manifest.yaml", "a is listed twice"},
 		"a name twice":           {"{manifest: b/manifest.yaml}", "{manifest: b/manifest.yaml, name: a}", "the name a is listed twice"},
-		"a logo up":              {"name: a}", "name: a, logo: ../x.svg}", "logo"},
 		"an unknown placeholder": {"{path}/v{version}", "{kind}/v{version}", "{kind} is no placeholder"},
 		"no version":             {"{path}/v{version}", "{path}/latest", "needs {version} once"},
 		"no plugins":             {"plugins:\n  - {manifest: a/manifest.yaml, name: a}\n  - {manifest: b/manifest.yaml}\n", "plugins: []\n", "plugins lists none"},
@@ -444,7 +443,7 @@ func TestABrokenPluginManifestLeavesTheOthersListed(t *testing.T) {
 		"good/logo.svg":        png,
 		"broken/manifest.yaml": pluginManifest("broken", "driver", "Broken") + "colour: red\n",
 		"big/manifest.yaml":    pluginManifest("big", "driver", "Big"),
-		"big/logo.svg":         png + strings.Repeat("x", MaxLogo),
+		"big/logo.svg":         png + strings.Repeat("x", MaxFetch),
 		"text/manifest.yaml":   pluginManifest("text", "driver", "Text"),
 		"text/logo.svg":        "not an image",
 		"drawn/manifest.yaml":  pluginManifest("drawn", "driver", "Drawn"),
@@ -453,7 +452,9 @@ func TestABrokenPluginManifestLeavesTheOthersListed(t *testing.T) {
 	r.git("tag", "good-v1.0.0")
 	r.git("tag", "broken-v1.0.0")
 
-	got, err := List(context.Background(), r.bare(), Options{})
+	logo := func(p Plugin) []string { return []string{p.Path + "/logo.svg"} }
+
+	got, err := List(context.Background(), r.bare(), Options{Fetch: logo})
 	if err != nil || len(got) != 6 {
 		t.Fatalf("%+v %v", got, err)
 	}
@@ -464,17 +465,18 @@ func TestABrokenPluginManifestLeavesTheOthersListed(t *testing.T) {
 	}
 
 	switch good := byName["good"]; {
-	case good.Err != nil || good.LogoType != "image/png" || string(good.LogoData) != png || len(good.Versions) != 1 || good.Versions[0].Tag != "good-v1.0.0":
+	case good.Err != nil || good.Fetched["good/logo.svg"].Type != "image/png" || string(good.Fetched["good/logo.svg"].Data) != png ||
+		len(good.Versions) != 1 || good.Versions[0].Tag != "good-v1.0.0":
 		t.Fatalf("good: %+v", good)
 	case byName["broken"].Err == nil || !strings.Contains(byName["broken"].Err.Error(), "field colour not found") || len(byName["broken"].Versions) != 1:
 		t.Fatalf("broken: %+v", byName["broken"])
 	case byName["gone"].Err == nil || !strings.Contains(byName["gone"].Err.Error(), "no gone/manifest.yaml"):
 		t.Fatalf("gone: %+v", byName["gone"])
-	case byName["big"].Err != nil || !errors.Is(byName["big"].LogoErr, ErrLogo) || byName["big"].LogoData != nil:
+	case byName["big"].Err != nil || !errors.Is(byName["big"].Fetched["big/logo.svg"].Err, ErrFetch) || byName["big"].Fetched["big/logo.svg"].Data != nil:
 		t.Fatalf("big: %+v", byName["big"])
-	case byName["text"].Err != nil || !errors.Is(byName["text"].LogoErr, ErrLogo) || !strings.Contains(byName["text"].LogoErr.Error(), "neither SVG"):
+	case byName["text"].Err != nil || !strings.HasPrefix(byName["text"].Fetched["text/logo.svg"].Type, "text/plain"):
 		t.Fatalf("text: %+v", byName["text"])
-	case byName["drawn"].LogoType != "image/svg+xml":
+	case byName["drawn"].Fetched["drawn/logo.svg"].Type != "image/svg+xml":
 		t.Fatalf("drawn: %+v", byName["drawn"])
 	}
 
@@ -531,26 +533,6 @@ func TestAllowLocalIsForTests(t *testing.T) {
 	}
 }
 
-// List gives each plugin its spec from the default branch's manifest, and At the version's.
-func TestListAndAtGiveTheSpec(t *testing.T) {
-	r := newRepo(t)
-	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints") + "spec: {level: 1}\n"})
-	r.git("tag", "v1.0.0")
-	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints") + "spec: {level: 2}\n"})
-	r.git("tag", "v1.1.0")
-
-	url := r.bare()
-
-	got, err := List(context.Background(), url, Options{})
-	if err != nil || len(got) != 1 || string(got[0].Spec) != `{"level":2}` {
-		t.Fatalf("%+v %v", got, err)
-	}
-
-	if m, _, err := At(context.Background(), url, ".", "1.0.0", Options{}); err != nil || string(m.Spec) != `{"level":1}` {
-		t.Fatalf("at 1.0.0: %s %v", m.Spec, err)
-	}
-}
-
 func TestAListingReadsARuntimeImage(t *testing.T) {
 	alpine := "docker.io/library/alpine@sha256:" + strings.Repeat("c", 64)
 
@@ -568,89 +550,5 @@ func TestAListingReadsARuntimeImage(t *testing.T) {
 	m, _, err := At(context.Background(), url, ".", "1.0.0", Options{})
 	if err != nil || m.Runtime != (manifest.Runtime{Image: alpine, Native: true}) {
 		t.Fatalf("at 1.0.0: %+v %v", m.Runtime, err)
-	}
-}
-
-func TestAListingReadsALightAndADarkLogo(t *testing.T) {
-	const light, dark = `<svg xmlns="http://www.w3.org/2000/svg"><title>light</title></svg>`, `<svg xmlns="http://www.w3.org/2000/svg"><title>dark</title></svg>`
-
-	r := newRepo(t)
-	text := strings.Replace(pluginManifest("lint", "driver", "Lints"), "logo: logo.svg\n", "logo: {light: logo.svg, dark: logo-dark.svg}\n", 1)
-	r.commit(map[string]string{"manifest.yaml": text, "logo.svg": light, "logo-dark.svg": dark})
-	r.git("tag", "v1.0.0")
-
-	url := r.bare()
-
-	got, err := List(context.Background(), url, Options{})
-	if err != nil || len(got) != 1 {
-		t.Fatalf("%+v %v", got, err)
-	}
-
-	p := got[0]
-	if p.Err != nil || p.LogoErr != nil || p.DarkLogoErr != nil || p.Logo != "logo.svg" || p.DarkLogo != "logo-dark.svg" ||
-		string(p.LogoData) != light || string(p.DarkLogoData) != dark || p.DarkLogoType != "image/svg+xml" {
-		t.Fatalf("listed %+v", p)
-	}
-
-	rel, err := AtRelease(context.Background(), url, ".", "1.0.0", Options{})
-	if err != nil || rel.Manifest.Logo != (manifest.Logo{Light: "logo.svg", Dark: "logo-dark.svg"}) ||
-		string(rel.LogoData) != light || string(rel.DarkLogoData) != dark {
-		t.Fatalf("at 1.0.0: %+v %v", rel, err)
-	}
-
-	// one logo stands in for both
-	r.commit(map[string]string{"manifest.yaml": strings.Replace(text, "{light: logo.svg, dark: logo-dark.svg}", "{dark: logo-dark.svg}", 1)})
-
-	got, err = List(context.Background(), r.bare(), Options{})
-	if err != nil || len(got) != 1 || got[0].Logo != "logo-dark.svg" || string(got[0].LogoData) != dark || string(got[0].DarkLogoData) != dark {
-		t.Fatalf("dark alone: %+v %v", got, err)
-	}
-}
-
-func TestAListingAndAReleaseGiveTheLogosColor(t *testing.T) {
-	r := newRepo(t)
-	r.commit(map[string]string{
-		"repository-manifest.yaml": "repository: 1\ntags: \"{path}/v{version}\"\nplugins:\n" +
-			"  - {manifest: step/a/manifest.yaml}\n  - {manifest: step/b/manifest.yaml, color: {dark: \"#101010\"}}\n",
-		"step/a/manifest.yaml": pluginManifest("a", "step", "A") + "color: {light: \"#ffffff\", dark: \"#000000\"}\n",
-		"step/b/manifest.yaml": pluginManifest("b", "step", "B") + "color: transparent\n",
-	})
-	r.git("tag", "step/a/v1.0.0")
-	r.git("tag", "step/b/v1.0.0")
-
-	url := r.bare()
-
-	got, err := List(context.Background(), url, Options{})
-	if err != nil || len(got) != 2 {
-		t.Fatalf("%+v %v", got, err)
-	}
-
-	byName := map[string]manifest.Color{}
-	for _, p := range got {
-		byName[p.Name] = p.Color
-	}
-
-	a, b := manifest.Color{Light: "#ffffff", Dark: "#000000"}, manifest.Color{Dark: "#101010"}
-	if byName["a"] != a || byName["b"] != b || b.ForLight() != "#101010" {
-		t.Fatalf("listed %+v", byName)
-	}
-
-	for dir, want := range map[string]manifest.Color{"step/a": a, "step/b": b} {
-		rel, err := AtRelease(context.Background(), url, dir, "1.0.0", Options{})
-		if err != nil || rel.Color != want {
-			t.Fatalf("%s: %+v %v", dir, rel.Color, err)
-		}
-	}
-}
-
-func TestARepositoryManifestsColorIsChecked(t *testing.T) {
-	r := newRepo(t)
-	r.commit(map[string]string{
-		"repository-manifest.yaml": "repository: 1\nplugins:\n  - {manifest: step/a/manifest.yaml, color: {light: red}}\n",
-		"step/a/manifest.yaml":     pluginManifest("a", "step", "A"),
-	})
-
-	if _, err := List(context.Background(), r.bare(), Options{}); err == nil || !strings.Contains(err.Error(), `plugins[0].color.light "red"`) {
-		t.Fatalf("listed: %v", err)
 	}
 }

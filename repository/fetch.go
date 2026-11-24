@@ -7,13 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"github.com/sideways-works/plugkit/manifest"
 )
+
+// maxURL bounds a URL Options.Fetch names.
+const maxURL = 2048
+
+// httpsURL tells whether name is an https URL with a host and no user or password.
+func httpsURL(name string) bool {
+	u, err := url.Parse(name)
+
+	return err == nil && len(name) <= maxURL && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Opaque == ""
+}
 
 // MaxFetch bounds each file Options.Fetch names.
 const MaxFetch = 1 << 20
@@ -29,7 +38,7 @@ type Fetched struct {
 }
 
 // fetched reads each name: a file of the repository at commit, by its path from the repository's
-// root, or an https URL fetched for version as a logo's is, from opt.LogoCache when kept there.
+// root, or an https URL fetched for version as a logo's is, from opt.FetchCache when kept there.
 func (g *git) fetched(ctx context.Context, commit, version string, names []string, opt Options) map[string]Fetched {
 	if len(names) == 0 {
 		return nil
@@ -48,7 +57,7 @@ func (g *git) fetched(ctx context.Context, commit, version string, names []strin
 		)
 
 		switch {
-		case manifest.LogoURL(name):
+		case httpsURL(name):
 			data, err = fetchURL(ctx, name, version, opt)
 		case local(name):
 			var found bool
@@ -83,13 +92,13 @@ func mediaType(data []byte) string {
 	return http.DetectContentType(data)
 }
 
-// fetchURL is the file at the https URL u for version, kept in opt.LogoCache when it is set.
+// fetchURL is the file at the https URL u for version, kept in opt.FetchCache when it is set.
 func fetchURL(ctx context.Context, u, version string, opt Options) ([]byte, error) {
 	kept := ""
 
-	if opt.LogoCache != "" {
+	if opt.FetchCache != "" {
 		sum := sha256.Sum256([]byte("fetch\x00" + u + "\x00" + version))
-		kept = filepath.Join(opt.LogoCache, hex.EncodeToString(sum[:]))
+		kept = filepath.Join(opt.FetchCache, hex.EncodeToString(sum[:]))
 
 		if data, err := os.ReadFile(kept); err == nil && len(data) <= MaxFetch { //nolint:gosec // the cache's own file, by its hash
 			return data, nil

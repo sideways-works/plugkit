@@ -56,8 +56,8 @@ func TestAnExtensionKeyIsTheProductsAndATypoIsRefused(t *testing.T) {
 
 	nodes, logo := m.Extra["nodes"], m.Extra["logo"]
 	if len(m.Extra) != 3 || nodes.Kind != yaml.SequenceNode || nodes.Content[0].Value != "small" || nodes.Line != 8 ||
-		logo.Value != "logo.svg" || m.Logo.Light != "logo.svg" {
-		t.Fatalf("extra %+v, logo %+v", m.Extra, m.Logo)
+		logo.Value != "logo.svg" {
+		t.Fatalf("extra %+v", m.Extra)
 	}
 
 	if strings.Join(checked, " ") != "logo:logo.svg nodes" {
@@ -77,20 +77,15 @@ func TestAnExtensionKeyIsTheProductsAndATypoIsRefused(t *testing.T) {
 	}
 }
 
-func TestAMovingKeyIsInExtraAsWell(t *testing.T) {
-	m, err := Parse([]byte(strings.Replace(extended, "nodes:\n  - small\nno_nodes: true\n", "color: transparent\n", 1)))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !m.Color.Transparent || m.Extra["color"].Value != "transparent" || m.Extra["logo"].Value != "logo.svg" || len(m.Extra) != 2 {
-		t.Fatalf("%+v %+v", m.Color, m.Extra)
-	}
-
-	// none at all leaves Extra nil
-	m, err = Parse([]byte(strings.Replace(extended, "logo: logo.svg\nnodes:\n  - small\nno_nodes: true\n", "", 1)))
+func TestAManifestOfPlugkitsKeysAloneHasNoExtra(t *testing.T) {
+	m, err := Parse([]byte(strings.Replace(extended, "logo: logo.svg\nnodes:\n  - small\nno_nodes: true\n", "", 1)))
 	if err != nil || m.Extra != nil {
 		t.Fatalf("%+v %v", m.Extra, err)
+	}
+
+	if _, err := Parse([]byte(strings.Replace(extended, "nodes:\n  - small\nno_nodes: true\n", "", 1))); err == nil ||
+		!strings.Contains(err.Error(), "line 6: field logo not found") {
+		t.Fatalf("a logo without its product: %v", err)
 	}
 }
 

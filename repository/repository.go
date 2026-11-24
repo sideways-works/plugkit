@@ -11,7 +11,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +22,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -51,19 +49,14 @@ type Repository struct {
 // Entry is one plugin: its manifest, whose directory is its path, and what a listing shows of it;
 // empty fields take the plugin manifest's.
 type Entry struct {
-	Manifest    string         `yaml:"manifest"`
-	Name        string         `yaml:"name"`
-	Kind        string         `yaml:"kind"`
-	Description string         `yaml:"description"`
-	Logo        manifest.Logo  `yaml:"logo"`
-	Color       manifest.Color `yaml:"color"`
-	// Extra are the keys this package doesn't read, which the extensions accept, and the moving
-	// ones, logo and color, as the YAML holds them.
+	Manifest    string `yaml:"manifest"`
+	Name        string `yaml:"name"`
+	Kind        string `yaml:"kind"`
+	Description string `yaml:"description"`
+	// Extra are the keys this package doesn't read, which the extensions accept, as the YAML holds
+	// them.
 	Extra map[string]yaml.Node `yaml:",inline"`
 }
-
-// entryMoving are an entry's keys this package still reads and gives in Extra as well.
-var entryMoving = []string{"logo", "color"} //nolint:gochecknoglobals // a list to read
 
 // Path is the plugin's directory, "." for the repository's root.
 func (e Entry) Path() string { return path.Dir(e.Manifest) }
@@ -75,9 +68,8 @@ const (
 )
 
 var (
-	hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-	relPath  = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
-	holder   = regexp.MustCompile(`\{[^{}]*\}`)
+	relPath = regexp.MustCompile(`^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$`)
+	holder  = regexp.MustCompile(`\{[^{}]*\}`)
 )
 
 // Parse reads a repository manifest, refusing unknown keys, another format, a path that leaves the
@@ -119,7 +111,7 @@ func ParseWith(data []byte, ext manifest.Extensions) (Repository, error) {
 	return r, nil
 }
 
-// entryExtra checks each entry's extra keys against ext and adds its moving keys to its Extra.
+// entryExtra checks each entry's extra keys against ext.
 func entryExtra(plugins []Entry, data []byte, ext manifest.Extensions) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -150,20 +142,6 @@ func entryExtra(plugins []Entry, data []byte, ext manifest.Extensions) error {
 		ext.CheckMapping(n, e.Extra, func(format string, args ...any) {
 			bad = append(bad, fmt.Sprintf("plugins[%d]: ", i)+fmt.Sprintf(format, args...))
 		})
-
-		if n == nil || n.Kind != yaml.MappingNode {
-			continue
-		}
-
-		for j := 0; j+1 < len(n.Content); j += 2 {
-			if k := n.Content[j].Value; slices.Contains(entryMoving, k) {
-				if e.Extra == nil {
-					e.Extra = map[string]yaml.Node{}
-				}
-
-				e.Extra[k] = *n.Content[j+1]
-			}
-		}
 	}
 
 	if len(bad) > 0 {
@@ -206,14 +184,6 @@ func (r Repository) check() []string {
 			add("plugins[%d]: %s is listed twice", i, e.Path())
 		case e.Name != "" && names[e.Name]:
 			add("plugins[%d]: the name %s is listed twice", i, e.Name)
-		case e.Logo.Light != "" && !local(e.Logo.Light):
-			add("plugins[%d].logo.light %q: a file of the repository, without ..", i, e.Logo.Light)
-		case e.Logo.Dark != "" && !local(e.Logo.Dark):
-			add("plugins[%d].logo.dark %q: a file of the repository, without ..", i, e.Logo.Dark)
-		case e.Color.Light != "" && !hexColor.MatchString(e.Color.Light):
-			add("plugins[%d].color.light %q: a color as #rrggbb, six hex digits", i, e.Color.Light)
-		case e.Color.Dark != "" && !hexColor.MatchString(e.Color.Dark):
-			add("plugins[%d].color.dark %q: a color as #rrggbb, six hex digits", i, e.Color.Dark)
 		}
 
 		paths[e.Path()] = true
@@ -235,25 +205,6 @@ func local(p string) bool {
 // why its manifest couldn't be read, and the listing holds the other plugins all the same.
 type Plugin struct {
 	Path, Name, Kind, Description string
-	// Logo is the logo for a light color scheme, a file of the repository or an https URL. LogoData
-	// is its content and LogoType its media type: an SVG, PNG, JPEG or WebP image of at most MaxLogo
-	// bytes, by its content. LogoErr says why there is none; it never fails the plugin. An SVG is
-	// the plugin author's, and a host sanitizes it before rendering it.
-	Logo     string
-	LogoData []byte
-	LogoType string
-	LogoErr  error
-	// DarkLogo and the fields after it are the same for a dark color scheme. A plugin with one
-	// logo has it in both.
-	DarkLogo     string
-	DarkLogoData []byte
-	DarkLogoType string
-	DarkLogoErr  error
-	// Color is the background a listing gives the logo: the repository manifest's, or else the
-	// plugin manifest's, its ForLight and ForDark the color for each scheme.
-	Color manifest.Color
-	// Spec is the manifest's spec as JSON, for the host to read; empty when it has none.
-	Spec json.RawMessage
 	// Extra are the plugin manifest's extra keys with the repository manifest entry's over them,
 	// as the YAML holds them: the product's to read. ManifestExtra are the plugin manifest's alone:
 	// a path in them is from the plugin's directory, one an entry gives from the repository's root.
@@ -273,11 +224,7 @@ type Version struct {
 // beforeRecheck runs between At's fetch of a tag and its second look at it; tests move the tag there.
 var beforeRecheck = func() {}
 
-// MaxLogo bounds a logo's bytes in a listing.
-const MaxLogo = 256 << 10
-
 var (
-	ErrLogo  = errors.New("logo")
 	ErrMoved = errors.New("the tag moved")
 )
 
@@ -306,17 +253,17 @@ type Options struct {
 	// A host that lists plugins for another product passes manifest.AnyExtension.
 	Extensions manifest.Extensions
 	// Fetch names the files a listing and AtRelease read for a plugin, into its Fetched: each a path
-	// from the repository's root, read at the commit as the README is, or an https URL, fetched as
-	// a logo's URL is; each within MaxFetch bytes. The product joins a path its manifest gives with
+	// from the repository's root, read at the commit as the README is, or an https URL, fetched over
+	// https alone, from public addresses alone; each within MaxFetch bytes. The product joins a path its manifest gives with
 	// the plugin's Path.
 	Fetch func(Plugin) []string
-	// AllowLocal lets an untrusted URL be file:// or a local path, and a logo's URL reach a
+	// AllowLocal lets an untrusted URL be file:// or a local path, and a fetched URL reach a
 	// loopback address: for tests alone, as a local path reads the host's own files and loopback
 	// reaches its own services.
 	AllowLocal bool
-	// LogoCache is a directory that keeps the logos fetched from a URL, by the URL and the
+	// FetchCache is a directory that keeps the files fetched from a URL, by the URL and the
 	// plugin's version, so a listing doesn't fetch them again; without one, each listing does.
-	LogoCache string
+	FetchCache string
 
 	// env is added last, for tests that must give git what Untrusted takes away.
 	env []string
@@ -396,18 +343,14 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 			}
 		}
 
-		if p.Err == nil {
-			// a logo's URL is fetched once for each version: the newest, or with none the commit
+		if p.Err == nil && opt.Fetch != nil {
+			// a URL is fetched once for each version: the newest, or with none the commit
 			version := head
 			if len(p.Versions) > 0 {
 				version = p.Versions[0].Version
 			}
 
-			p.LogoData, p.LogoType, p.LogoErr, p.DarkLogoData, p.DarkLogoType, p.DarkLogoErr = g.logos(ctx, head, p.Logo, p.DarkLogo, version, opt)
-
-			if opt.Fetch != nil {
-				p.Fetched = g.fetched(ctx, head, version, opt.Fetch(p), opt)
-			}
+			p.Fetched = g.fetched(ctx, head, version, opt.Fetch(p), opt)
 		}
 
 		out = append(out, p)
@@ -420,61 +363,10 @@ func List(ctx context.Context, url string, opt Options) ([]Plugin, error) {
 func (g *git) listed(ctx context.Context, commit string, e Entry) Plugin {
 	p, err := g.plugin(ctx, commit, e)
 	if err != nil {
-		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Logo: e.Logo.ForLight(), DarkLogo: e.Logo.ForDark(), Color: e.Color, Extra: e.Extra, Err: err}
+		return Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Extra: e.Extra, Err: err}
 	}
 
 	return p
-}
-
-// logos are the images at light and at dark, as logo reads each; the same name is read once.
-func (g *git) logos(ctx context.Context, commit, light, dark, version string, opt Options) ([]byte, string, error, []byte, string, error) {
-	var (
-		lData, dData []byte
-		lType, dType string
-		lErr, dErr   error
-	)
-
-	if light != "" {
-		lData, lType, lErr = g.logo(ctx, commit, light, version, opt)
-	}
-
-	switch {
-	case dark == light:
-		dData, dType, dErr = lData, lType, lErr
-	case dark != "":
-		dData, dType, dErr = g.logo(ctx, commit, dark, version, opt)
-	}
-
-	return lData, lType, lErr, dData, dType, dErr
-}
-
-// logo is the image at name, a file of the repository at commit or an https URL fetched for
-// version, and its media type: SVG, PNG, JPEG or WebP by its content, within MaxLogo bytes.
-func (g *git) logo(ctx context.Context, commit, name, version string, opt Options) ([]byte, string, error) {
-	if manifest.LogoURL(name) {
-		return fetchLogo(ctx, name, version, opt)
-	}
-
-	size, err := g.run(ctx, "cat-file", "-s", commit+":"+name)
-	if err != nil {
-		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, name, err)
-	}
-
-	if n, err := strconv.ParseInt(strings.TrimSpace(string(size)), 10, 64); err != nil || n > MaxLogo {
-		return nil, "", fmt.Errorf("%w %s: over %d bytes", ErrLogo, name, MaxLogo)
-	}
-
-	data, err := g.run(ctx, "cat-file", "blob", commit+":"+name)
-	if err != nil {
-		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, name, err)
-	}
-
-	typ := imageType(data)
-	if typ == "" {
-		return nil, "", fmt.Errorf("%w %s: neither SVG, PNG, JPEG nor WebP", ErrLogo, name)
-	}
-
-	return data, typ, nil
 }
 
 // imageType is data's media type when it is an image a listing shows, by its content.
@@ -501,22 +393,13 @@ func At(ctx context.Context, url, dir, version string, opt Options) (manifest.Ma
 	return r.Manifest, r.Commit, err
 }
 
-// Release is a version of a plugin: its manifest and commit as At reads them, its logos as a
-// listing gives them, LogoErr and DarkLogoErr saying why there is none, and its README.
+// Release is a version of a plugin: its manifest and commit as At reads them, the files
+// Options.Fetch names, and its README.
 type Release struct {
-	Manifest     manifest.Manifest
-	Commit       string
-	Logo         string
-	LogoData     []byte
-	LogoType     string
-	LogoErr      error
-	DarkLogo     string
-	DarkLogoData []byte
-	DarkLogoType string
-	DarkLogoErr  error
-	// Color is the background a listing gives the logo, Extra the extra keys and Fetched the files
-	// Options.Fetch named, as Plugin's; the manifest's own extra keys are Manifest.Extra.
-	Color   manifest.Color
+	Manifest manifest.Manifest
+	Commit   string
+	// Extra are the extra keys and Fetched the files Options.Fetch named, as Plugin's; the
+	// manifest's own extra keys are Manifest.Extra.
 	Extra   map[string]yaml.Node
 	Fetched map[string]Fetched
 	// Readme is README.md in the plugin's directory at the commit, empty when there is none, and
@@ -526,13 +409,12 @@ type Release struct {
 	ReadmeErr error
 }
 
-// AtRelease is At with the version's logo, a file of the repository at the version's commit or an
-// https URL fetched as List fetches it, and its README.
+// AtRelease is At with the version's README and the files Options.Fetch names.
 func AtRelease(ctx context.Context, url, dir, version string, opt Options) (Release, error) {
 	return at(ctx, url, dir, version, opt, true)
 }
 
-func at(ctx context.Context, url, dir, version string, opt Options, withLogo bool) (Release, error) {
+func at(ctx context.Context, url, dir, version string, opt Options, withFiles bool) (Release, error) {
 	g, ctx, cancel, err := open(ctx, url, opt)
 	if err != nil {
 		return Release{}, err
@@ -586,13 +468,8 @@ func at(ctx context.Context, url, dir, version string, opt Options, withLogo boo
 		return Release{}, fmt.Errorf("%w: %s's tag %s names %s, not %s", ErrMoved, url, tag, commit, opt.Commit)
 	}
 
-	logo := logoOf(r.Plugins[i], m)
-
-	rel := Release{Manifest: m, Commit: commit, Logo: logo.ForLight(), DarkLogo: logo.ForDark(), Color: colorOf(r.Plugins[i], m),
-		Extra: extraOf(r.Plugins[i], m)}
-	if withLogo {
-		rel.LogoData, rel.LogoType, rel.LogoErr, rel.DarkLogoData, rel.DarkLogoType, rel.DarkLogoErr = g.logos(ctx, commit, rel.Logo, rel.DarkLogo,
-			strings.TrimPrefix(version, "v"), opt)
+	rel := Release{Manifest: m, Commit: commit, Extra: extraOf(r.Plugins[i], m)}
+	if withFiles {
 		rel.Readme, rel.ReadmeErr = g.readme(ctx, commit, r.Plugins[i].Path())
 		rel.Fetched = g.fetchedFor(ctx, commit, strings.TrimPrefix(version, "v"), p, rel, opt)
 	}
@@ -606,7 +483,7 @@ func (g *git) fetchedFor(ctx context.Context, commit, version string, p Plugin, 
 		return nil
 	}
 
-	at := Plugin{Path: p.Path, Name: p.Name, Kind: p.Kind, Description: p.Description, Spec: rel.Manifest.Spec, Extra: rel.Extra, ManifestExtra: rel.Manifest.Extra}
+	at := Plugin{Path: p.Path, Name: p.Name, Kind: p.Kind, Description: p.Description, Extra: rel.Extra, ManifestExtra: rel.Manifest.Extra}
 
 	return g.fetched(ctx, commit, version, opt.Fetch(at), opt)
 }
@@ -625,34 +502,6 @@ func extraOf(e Entry, m manifest.Manifest) map[string]yaml.Node {
 	maps.Copy(out, e.Extra)
 
 	return out
-}
-
-// colorOf is the color a listing gives e's logo: the repository manifest's, or else the plugin
-// manifest's.
-func colorOf(e Entry, m manifest.Manifest) manifest.Color {
-	if !e.Color.IsZero() {
-		return e.Color
-	}
-
-	return m.Color
-}
-
-// logoOf is the logo a listing shows of e: the repository manifest's, files named from the
-// repository's root, or else the plugin manifest's, files of its directory or URLs.
-func logoOf(e Entry, m manifest.Manifest) manifest.Logo {
-	if !e.Logo.IsZero() {
-		return e.Logo
-	}
-
-	inRepo := func(l string) string {
-		if l == "" || manifest.LogoURL(l) {
-			return l
-		}
-
-		return path.Join(e.Path(), l)
-	}
-
-	return manifest.Logo{Light: inRepo(m.Logo.Light), Dark: inRepo(m.Logo.Dark)}
 }
 
 // versions are the tags of p that pattern names, newest first.
@@ -882,7 +731,7 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		return Plugin{}, err
 	}
 
-	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description, Spec: m.Spec}
+	p := Plugin{Path: e.Path(), Name: e.Name, Kind: e.Kind, Description: e.Description}
 
 	if p.Name == "" {
 		p.Name = m.Name
@@ -896,10 +745,6 @@ func (g *git) plugin(ctx context.Context, commit string, e Entry) (Plugin, error
 		p.Description = m.Description
 	}
 
-	logo := logoOf(e, m)
-	p.Logo, p.DarkLogo = logo.ForLight(), logo.ForDark()
-
-	p.Color = colorOf(e, m)
 	p.Extra, p.ManifestExtra = extraOf(e, m), m.Extra
 
 	return p, nil

@@ -490,10 +490,7 @@ platforms: [` + host + `]
 
 const metaManifest = `name: store
 kind: meta
-logo: logo.svg
-schemas:
-  put: {message: schemas/put.json, answer: schemas/put-answer.json}
-ack_timeout: 30s
+include: [schemas]
 `
 
 // A meta plugin resolves to its directory as a plugin built for any platform does, and needs no
@@ -502,7 +499,6 @@ func TestAMetaPluginResolvesToItsDirectory(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, map[string]string{
 		"meta/store/manifest.yaml":           metaManifest,
-		"meta/store/logo.svg":                "<svg/>",
 		"meta/store/schemas/put.json":        `{"type": "object"}`,
 		"meta/store/schemas/put-answer.json": `{"type": "object"}`,
 	})
@@ -521,7 +517,7 @@ func TestAMetaPluginResolvesToItsDirectory(t *testing.T) {
 		t.Fatalf("resolved %+v", r)
 	}
 
-	for _, f := range []string{"manifest.yaml", "logo.svg", "schemas/put.json", "schemas/put-answer.json"} {
+	for _, f := range []string{"manifest.yaml", "schemas/put.json", "schemas/put-answer.json"} {
 		if _, err := os.Stat(filepath.Join(r.Dir, f)); err != nil {
 			t.Fatal(err)
 		}
@@ -532,9 +528,8 @@ func TestAMetaPluginResolvesToItsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srv, _ := serve(t, map[string][]byte{"/store.zip": z.Bytes(), "/bad.zip": zipOf(t,
-		raw{"manifest.yaml", 0o644, metaManifest}, raw{"logo.svg", 0o644, "<svg/>"},
-		raw{"schemas/put.json", 0o644, "type: object"}, raw{"schemas/put-answer.json", 0o644, "{}"})})
+	bad := zipOf(t, raw{"manifest.yaml", 0o644, metaManifest})
+	srv, _ := serve(t, map[string][]byte{"/store.zip": z.Bytes(), "/bad.zip": bad})
 
 	s = Store{Dir: t.TempDir(), Client: srv.Client()}
 
@@ -542,9 +537,7 @@ func TestAMetaPluginResolvesToItsDirectory(t *testing.T) {
 		t.Fatalf("by zip: %+v %v", r, err)
 	}
 
-	bad := zipOf(t, raw{"manifest.yaml", 0o644, metaManifest}, raw{"logo.svg", 0o644, "<svg/>"},
-		raw{"schemas/put.json", 0o644, "type: object"}, raw{"schemas/put-answer.json", 0o644, "{}"})
-	if _, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/bad.zip", SHA256: sum(bad)}}, "linux/arm64"); err == nil || !strings.Contains(err.Error(), "schemas/put.json is no JSON") {
+	if _, err := s.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/bad.zip", SHA256: sum(bad)}}, "linux/arm64"); err == nil || !strings.Contains(err.Error(), "includes schemas") {
 		t.Fatal(err)
 	}
 }
@@ -632,7 +625,6 @@ func TestManyResolvesAtOnceShareOneEntry(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, map[string]string{
 		"manifest.yaml":           metaManifest,
-		"logo.svg":                "<svg/>",
 		"schemas/put.json":        "{}",
 		"schemas/put-answer.json": "{}",
 	})
@@ -723,7 +715,7 @@ func TestMain(m *testing.M) {
 // branch and tag.
 func TestTheFallbackFetchesThePinsRefAlone(t *testing.T) {
 	root := t.TempDir()
-	write(t, root, map[string]string{"manifest.yaml": metaManifest, "logo.svg": "<svg/>", "schemas/put.json": "{}", "schemas/put-answer.json": "{}"})
+	write(t, root, map[string]string{"manifest.yaml": metaManifest, "schemas/put.json": "{}", "schemas/put-answer.json": "{}"})
 	git(t, root, "init", "-q")
 	git(t, root, "add", ".")
 	git(t, root, "commit", "-q", "-m", "meta")
@@ -754,7 +746,7 @@ func TestTheFallbackFetchesThePinsRefAlone(t *testing.T) {
 
 func TestAnUntrustedFetchIsCapped(t *testing.T) {
 	root := t.TempDir()
-	write(t, root, map[string]string{"manifest.yaml": metaManifest, "logo.svg": "<svg/>", "schemas/put.json": "{}", "schemas/put-answer.json": "{}", "big": random(t, 1<<20)})
+	write(t, root, map[string]string{"manifest.yaml": metaManifest, "schemas/put.json": "{}", "schemas/put-answer.json": "{}", "big": random(t, 1<<20)})
 	git(t, root, "init", "-q")
 	git(t, root, "add", ".")
 	git(t, root, "commit", "-q", "-m", "meta")
@@ -890,32 +882,5 @@ func TestAnIncludedSymlinkOfACommitIsRefused(t *testing.T) {
 		if !strings.HasPrefix(e.Name(), ".") {
 			t.Fatalf("the cache kept %s", e.Name())
 		}
-	}
-}
-
-// A manifest's spec is in the resolved manifest, from a commit and from a zip.
-func TestASpecIsResolved(t *testing.T) {
-	text := includedManifest + "spec:\n  port: 8080\n"
-	root := t.TempDir()
-	write(t, root, map[string]string{"manifest.yaml": text, "service.yaml": "s", "conf/cache.conf": "c"})
-	git(t, root, "init", "-q")
-	git(t, root, "add", ".")
-	git(t, root, "commit", "-q", "-m", "cache")
-
-	r, err := Store{Dir: t.TempDir(), Tool: "/nonexistent/docker"}.Resolve(context.Background(), Pin{Repository: root, Commit: git(t, root, "rev-parse", "HEAD")}, host)
-	if err != nil || string(r.Manifest.Spec) != `{"port":8080}` {
-		t.Fatalf("by commit: %s %v", r.Manifest.Spec, err)
-	}
-
-	var z bytes.Buffer
-	if err := bundle.Pack(r.Dir, &z); err != nil {
-		t.Fatal(err)
-	}
-
-	srv, _ := serve(t, map[string][]byte{"/cache.zip": z.Bytes()})
-
-	r, err = Store{Dir: t.TempDir(), Client: srv.Client()}.Resolve(context.Background(), Pin{Zip: &Zip{URL: srv.URL + "/cache.zip", SHA256: sum(z.Bytes())}}, host)
-	if err != nil || string(r.Manifest.Spec) != `{"port":8080}` {
-		t.Fatalf("by zip: %s %v", r.Manifest.Spec, err)
 	}
 }

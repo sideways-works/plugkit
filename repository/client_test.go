@@ -59,7 +59,7 @@ func logoServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 		case "/big.png":
 			w.Header().Set("Content-Type", "image/png")
 			// no length up front: the cap holds as the body is read
-			for range 300 {
+			for range MaxFetch/1024 + 1 {
 				_, _ = w.Write([]byte(png + strings.Repeat("\x00", 1024-len(png)))) //nolint:errcheck // a test server
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
@@ -87,13 +87,21 @@ func testOptions(t *testing.T, srv *httptest.Server) Options {
 	return Options{AllowLocal: true, roots: tr.TLSClientConfig.RootCAs}
 }
 
-func TestALogosURLIsFetched(t *testing.T) {
+// fetchOne is the file at u, as Options.Fetch would give it.
+func fetchOne(u string, opt Options) Fetched {
+	return (&git{}).fetched(context.Background(), "", "1.0.0", []string{u}, opt)[u]
+}
+
+func TestAURLIsFetched(t *testing.T) {
 	srv, _ := logoServer(t)
 	opt := testOptions(t, srv)
 
-	data, typ, err := fetchLogo(context.Background(), srv.URL+"/logo.png", "1.0.0", opt)
-	if err != nil || typ != "image/png" || string(data) != png {
-		t.Fatalf("%q %s %v", data, typ, err)
+	if f := fetchOne(srv.URL+"/logo.png", opt); f.Err != nil || f.Type != "image/png" || string(f.Data) != png {
+		t.Fatalf("%+v", f)
+	}
+
+	if f := fetchOne(srv.URL+"/page.png", opt); f.Err != nil || !strings.HasPrefix(f.Type, "text/html") {
+		t.Fatalf("a page: %+v", f)
 	}
 
 	cases := map[string]struct {
@@ -103,45 +111,42 @@ func TestALogosURLIsFetched(t *testing.T) {
 	}{
 		"a redirect":            {srv.URL + "/moved.png", opt, "redirects"},
 		"a body over the cap":   {srv.URL + "/big.png", opt, "too big"},
-		"no image":              {srv.URL + "/page.png", opt, "neither SVG, PNG, JPEG nor WebP"},
 		"missing":               {srv.URL + "/none.png", opt, "404"},
 		"loopback, untested":    {srv.URL + "/logo.png", Options{roots: opt.roots}, "never fetched from"},
 		"localhost, untested":   {strings.Replace(srv.URL, "127.0.0.1", "localhost", 1) + "/logo.png", Options{roots: opt.roots}, "never fetched from"},
 		"a private address":     {"https://10.0.0.1/logo.png", opt, "never fetched from"},
 		"the metadata service":  {"https://169.254.169.254/latest/meta-data", opt, "never fetched from"},
-		"plain http":            {"http://example.com/logo.png", opt, "an https URL"},
-		"a user in the URL":     {"https://me@example.com/logo.png", opt, "an https URL"},
+		"plain http":            {"http://example.com/logo.png", opt, "nor an https URL"},
+		"a user in the URL":     {"https://me@example.com/logo.png", opt, "nor an https URL"},
 		"an untrusted local IP": {"https://[::ffff:10.0.0.1]/logo.png", opt, "never fetched from"},
 	}
 
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, _, err := fetchLogo(context.Background(), c.url, "1.0.0", c.opt)
-			if !errors.Is(err, ErrLogo) || !strings.Contains(err.Error(), c.says) {
-				t.Fatalf("got %v, want %q", err, c.says)
+			if f := fetchOne(c.url, c.opt); !errors.Is(f.Err, ErrFetch) || !strings.Contains(f.Err.Error(), c.says) {
+				t.Fatalf("got %v, want %q", f.Err, c.says)
 			}
 		})
 	}
 }
 
-// List and AtRelease fetch a logo's URL, keep it by URL and version, and a logo that fails sets
-// LogoErr and leaves the plugin listed.
-func TestListingsFetchALogosURLOncePerVersion(t *testing.T) {
+// List and AtRelease fetch a URL Options.Fetch names, keep it by URL and version, and a fetch
+// that fails sets its Err and leaves the plugin listed.
+func TestListingsFetchAURLOncePerVersion(t *testing.T) {
 	srv, hits := logoServer(t)
 	opt := testOptions(t, srv)
-	opt.LogoCache = t.TempDir()
+	opt.FetchCache = t.TempDir()
 
-	withLogo := func(logo string) string {
-		return strings.Replace(pluginManifest("lint", "driver", "Lints"), "logo: logo.svg", "logo: "+logo, 1)
-	}
+	logo := srv.URL + "/logo.png"
+	opt.Fetch = func(Plugin) []string { return []string{logo} }
 
 	r := newRepo(t)
-	r.commit(map[string]string{"manifest.yaml": withLogo(srv.URL + "/logo.png")})
+	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints")})
 	r.git("tag", "v1.0.0")
 
 	url := r.bare()
 
-	list := func() Plugin {
+	list := func() Fetched {
 		t.Helper()
 
 		got, err := List(context.Background(), url, opt)
@@ -149,45 +154,33 @@ func TestListingsFetchALogosURLOncePerVersion(t *testing.T) {
 			t.Fatalf("%+v %v", got, err)
 		}
 
-		return got[0]
+		return got[0].Fetched[logo]
 	}
 
-	if p := list(); p.LogoErr != nil || p.LogoType != "image/png" || string(p.LogoData) != png || p.Logo != srv.URL+"/logo.png" {
-		t.Fatalf("%+v", p)
+	if f := list(); f.Err != nil || f.Type != "image/png" || string(f.Data) != png {
+		t.Fatalf("%+v", f)
 	}
 
-	if p := list(); p.LogoErr != nil || hits.Load() != 1 {
-		t.Fatalf("listed again: %v, %d fetches", p.LogoErr, hits.Load())
+	if f := list(); f.Err != nil || hits.Load() != 1 {
+		t.Fatalf("listed again: %v, %d fetches", f.Err, hits.Load())
 	}
 
 	r.commit(map[string]string{"README": "x"})
 	r.git("tag", "v1.1.0")
 	url = r.bare()
 
-	if p := list(); p.LogoErr != nil || hits.Load() != 2 {
-		t.Fatalf("a new version: %v, %d fetches", p.LogoErr, hits.Load())
+	if f := list(); f.Err != nil || hits.Load() != 2 {
+		t.Fatalf("a new version: %v, %d fetches", f.Err, hits.Load())
 	}
 
 	rel, err := AtRelease(context.Background(), url, ".", "1.0.0", opt)
-	if err != nil || rel.LogoErr != nil || rel.LogoType != "image/png" || hits.Load() != 2 {
-		t.Fatalf("at 1.0.0: %+v %v, %d fetches", rel, err, hits.Load())
+	if err != nil || rel.Fetched[logo].Err != nil || rel.Fetched[logo].Type != "image/png" || hits.Load() != 2 {
+		t.Fatalf("at 1.0.0: %+v %v, %d fetches", rel.Fetched, err, hits.Load())
 	}
 
-	r.commit(map[string]string{"manifest.yaml": withLogo(srv.URL + "/page.png")})
-	r.git("tag", "v1.2.0")
-	url = r.bare()
+	logo = srv.URL + "/none.png"
 
-	if p := list(); !errors.Is(p.LogoErr, ErrLogo) || p.LogoData != nil {
-		t.Fatalf("no image: %+v", p)
-	}
-
-	// a file logo is read at the version's commit
-	r.commit(map[string]string{"manifest.yaml": pluginManifest("lint", "driver", "Lints"), "logo.svg": `<svg xmlns="http://www.w3.org/2000/svg"/>`})
-	r.git("tag", "v1.3.0")
-	url = r.bare()
-
-	rel, err = AtRelease(context.Background(), url, ".", "v1.3.0", opt)
-	if err != nil || rel.LogoErr != nil || rel.LogoType != "image/svg+xml" || rel.Logo != "logo.svg" {
-		t.Fatalf("a file logo at 1.3.0: %+v %v", rel, err)
+	if f := list(); !errors.Is(f.Err, ErrFetch) || f.Data != nil {
+		t.Fatalf("missing: %+v", f)
 	}
 }

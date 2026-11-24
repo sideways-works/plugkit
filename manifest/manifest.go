@@ -8,17 +8,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
-	"net/url"
 	"path"
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/sideways-works/plugkit/semver"
 	"go.yaml.in/yaml/v3"
@@ -53,60 +50,30 @@ type Manifest struct {
 	// the same relative paths, after the build if there is one. A plugin with no program may have
 	// no build at all: then nothing runs.
 	Include []string `yaml:"include"`
-	// Description, Logo and Color are for listings.
+	// Description is for listings.
 	Description string `yaml:"description"`
-	Logo        Logo   `yaml:"logo"`
-	Color       Color  `yaml:"color"`
 	// Implements and Requires are "<name> <semver range>": the interfaces the plugin offers and those
 	// it needs another plugin to offer.
 	Implements []string `yaml:"implements"`
 	Requires   []string `yaml:"requires"`
-	// Schemas, of a meta plugin alone, are its messages by name, each a JSON Schema file of the
-	// plugin's directory for the message and one for its answer.
-	Schemas map[string]Schema `yaml:"schemas"`
-	// AckTimeout, of a meta plugin alone, is a Go duration: how long a receiver has to ack or nack
-	// each message.
-	AckTimeout string `yaml:"ack_timeout"`
-	// Permissions are what the plugin lets people do, each granted by default from a role up.
-	Permissions []Permission `yaml:"permissions"`
-	// Spec is the manifest's spec, a mapping for the host to read and check, as JSON; plugkit
-	// carries it and never looks into it. Empty when the manifest has none.
-	Spec json.RawMessage `yaml:"-"`
 	// Extra are the top-level keys plugkit doesn't read, which the Extensions given to ParseWith
-	// accept, and the Moving keys, each as its YAML holds it, lines and all. Nil when there are none.
+	// accept, each as its YAML holds it, lines and all. Nil when there are none.
 	Extra map[string]yaml.Node `yaml:"-"`
 	// ExtraFiles are the files of the plugin's directory the extensions' keys name, kept in the zip
 	// under their own paths beside the manifest, sorted.
 	ExtraFiles []string `yaml:"-"`
 }
 
-// document is a manifest as its YAML holds it: spec is read as a node, to convert to JSON, and the
-// keys plugkit doesn't read are kept to check against the extensions.
+// document is a manifest as its YAML holds it: the keys plugkit doesn't read are kept to check
+// against the extensions.
 type document struct {
 	Manifest `yaml:",inline"`
 
-	Spec  yaml.Node            `yaml:"spec"`
 	Extra map[string]yaml.Node `yaml:",inline"`
 }
 
-// Permission is one thing a plugin lets people do: its name (area:action), what it allows, and the
-// least role that has it by default.
-type Permission struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
-	Default     string `yaml:"default"`
-}
-
-// Roles are the roles a permission's default may name, least first.
-var Roles = []string{"display", "viewer", "operator", "maintainer", "admin"}
-
-// Schema is a meta plugin's message: the JSON Schema files of the message and of its answer.
-type Schema struct {
-	Message string `yaml:"message"`
-	Answer  string `yaml:"answer"`
-}
-
-// KindMeta is a plugin of schemas alone: nothing is built and nothing runs.
+// KindMeta is a plugin of files alone, the ones its keys name and include: nothing is built and
+// nothing runs.
 const KindMeta = "meta"
 
 type Build struct {
@@ -191,13 +158,6 @@ func ParseWith(data []byte, ext Extensions) (Manifest, error) {
 
 	m := d.Manifest
 
-	spec, err := specOf(&d.Spec)
-	if err != nil {
-		return Manifest{}, fmt.Errorf("%w: %w", ErrManifest, err)
-	}
-
-	m.Spec = spec
-
 	extra, lines, err := extraOf(data, d.Extra)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%w: %w", ErrManifest, err)
@@ -207,7 +167,7 @@ func ParseWith(data []byte, ext Extensions) (Manifest, error) {
 
 	var refused []string
 
-	m.ExtraFiles = ext.check(m.Extra, Moving, lines, func(format string, args ...any) { refused = append(refused, fmt.Sprintf(format, args...)) })
+	m.ExtraFiles = ext.check(m.Extra, lines, func(format string, args ...any) { refused = append(refused, fmt.Sprintf(format, args...)) })
 
 	refused = append(refused, m.check()...)
 
@@ -240,7 +200,6 @@ func (m Manifest) check() []string {
 	}
 
 	m.checkListing(add)
-	m.checkPermissions(add)
 	m.checkRuntime(add)
 	m.checkInclude(add)
 
@@ -248,10 +207,6 @@ func (m Manifest) check() []string {
 		m.checkMeta(add)
 
 		return bad
-	}
-
-	if len(m.Schemas) > 0 || m.AckTimeout != "" {
-		add("schemas and ack_timeout belong to a plugin of kind %s", KindMeta)
 	}
 
 	m.checkPlatforms(add)
@@ -392,24 +347,6 @@ func (m Manifest) checkLayout(add func(string, ...any)) {
 }
 
 func (m Manifest) checkListing(add func(string, ...any)) {
-	for _, l := range []struct{ key, logo string }{{"logo.light", m.Logo.Light}, {"logo.dark", m.Logo.Dark}} {
-		switch {
-		case l.logo == "" || localPath(l.logo):
-		case strings.Contains(l.logo, "://"):
-			if !LogoURL(l.logo) {
-				add("%s %q: an https URL with a host and no user or password, at most %d bytes", l.key, l.logo, maxLogoURL)
-			}
-		default:
-			add("%s %q: a file of the plugin's directory, without .., or an https URL", l.key, l.logo)
-		}
-	}
-
-	for _, c := range []struct{ key, color string }{{"color.light", m.Color.Light}, {"color.dark", m.Color.Dark}} {
-		if c.color != "" && !hexColor.MatchString(c.color) {
-			add("%s %q: a color as #rrggbb, six hex digits", c.key, c.color)
-		}
-	}
-
 	for key, list := range map[string][]string{"implements": m.Implements, "requires": m.Requires} {
 		for _, e := range list {
 			n, r, ok := strings.Cut(strings.TrimSpace(e), " ")
@@ -510,31 +447,6 @@ func (m Manifest) checkRuntime(add func(string, ...any)) {
 	}
 }
 
-var permissionName = regexp.MustCompile(`^[a-z-]+:[a-z-]+$`)
-
-func (m Manifest) checkPermissions(add func(string, ...any)) {
-	seen := map[string]bool{}
-
-	for i, p := range m.Permissions {
-		switch {
-		case !permissionName.MatchString(p.Name):
-			add("permissions[%d].name %q: area:action, lower-case letters and dashes", i, p.Name)
-		case seen[p.Name]:
-			add("permissions[%d]: %s is there twice", i, p.Name)
-		}
-
-		seen[p.Name] = true
-
-		if strings.TrimSpace(p.Description) == "" {
-			add("permissions[%d] (%s): description is missing", i, p.Name)
-		}
-
-		if !slices.Contains(Roles, p.Default) {
-			add("permissions[%d] (%s): default %q is none of %s", i, p.Name, p.Default, strings.Join(Roles, ", "))
-		}
-	}
-}
-
 func (m Manifest) checkMeta(add func(string, ...any)) {
 	b := m.Build
 
@@ -546,187 +458,6 @@ func (m Manifest) checkMeta(add func(string, ...any)) {
 	case len(m.Assets) > 0:
 		add("a plugin of kind %s has no assets: nothing builds them", KindMeta)
 	}
-
-	for _, n := range slices.Sorted(maps.Keys(m.Schemas)) {
-		sc := m.Schemas[n]
-		if !name.MatchString(n) || !localPath(sc.Message) || !localPath(sc.Answer) {
-			add("schemas.%s: a message's name, and its message and answer, each a file of the plugin's directory", n)
-		}
-	}
-
-	if m.AckTimeout != "" {
-		if d, err := time.ParseDuration(m.AckTimeout); err != nil || d <= 0 {
-			add("ack_timeout %q: a Go duration above zero, such as 30s", m.AckTimeout)
-		}
-	}
-}
-
-// Logo is the image a listing shows of a plugin, for a light and for a dark color scheme: each a
-// file of the plugin's directory or an https URL. The string form sets Light alone, and either one
-// alone stands in for both.
-type Logo struct {
-	Light string `yaml:"light"`
-	Dark  string `yaml:"dark"`
-}
-
-var errLogo = errors.New("logo")
-
-// UnmarshalYAML reads a string, such as "logo.svg", as Light, and a mapping of light and dark.
-func (l *Logo) UnmarshalYAML(n *yaml.Node) error {
-	switch n.Kind {
-	case yaml.ScalarNode:
-		*l = Logo{}
-
-		return n.Decode(&l.Light) //nolint:wrapcheck // the decoder's own error, with its line
-	case yaml.MappingNode:
-	default:
-		return fmt.Errorf("%w: line %d: a string, such as \"logo.svg\", or a mapping of light and dark", errLogo, n.Line)
-	}
-
-	var out Logo
-
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := n.Content[i], n.Content[i+1]
-
-		var err error
-
-		switch k.Value {
-		case "light":
-			err = v.Decode(&out.Light)
-		case "dark":
-			err = v.Decode(&out.Dark)
-		default:
-			return fmt.Errorf("%w: line %d: field %s not found: it takes light and dark", errLogo, k.Line, k.Value)
-		}
-
-		if err != nil {
-			return err //nolint:wrapcheck // the decoder's own error, with its line
-		}
-	}
-
-	*l = out
-
-	return nil
-}
-
-// Color is the background a listing gives a plugin's logo, for a light and for a dark color scheme,
-// each #rrggbb; or Transparent, the string transparent, for none. Either color alone stands in for
-// both. How it contrasts with what is drawn on it is the listing's to judge.
-type Color struct {
-	Light       string `yaml:"light"`
-	Dark        string `yaml:"dark"`
-	Transparent bool   `yaml:"-"`
-}
-
-// colorTransparent is the string form of a color that is none.
-const colorTransparent = "transparent"
-
-var (
-	errColor = errors.New("color")
-	hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-)
-
-// UnmarshalYAML reads the string transparent, and a mapping of light and dark.
-func (c *Color) UnmarshalYAML(n *yaml.Node) error {
-	switch {
-	case n.Kind == yaml.ScalarNode && n.Value == colorTransparent:
-		*c = Color{Transparent: true}
-
-		return nil
-	case n.Kind != yaml.MappingNode:
-		return fmt.Errorf("%w: line %d: the string %s, or a mapping of light and dark, each #rrggbb", errColor, n.Line, colorTransparent)
-	}
-
-	var out Color
-
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := n.Content[i], n.Content[i+1]
-
-		var err error
-
-		switch k.Value {
-		case "light":
-			err = v.Decode(&out.Light)
-		case "dark":
-			err = v.Decode(&out.Dark)
-		default:
-			return fmt.Errorf("%w: line %d: field %s not found: it takes light and dark", errColor, k.Line, k.Value)
-		}
-
-		if err != nil {
-			return err //nolint:wrapcheck // the decoder's own error, with its line
-		}
-	}
-
-	*c = out
-
-	return nil
-}
-
-// IsZero tells whether the manifest names no color.
-func (c Color) IsZero() bool { return c == Color{} }
-
-// ForLight is the color for a light color scheme: Light, or else Dark; none when transparent.
-func (c Color) ForLight() string {
-	if c.Light != "" {
-		return c.Light
-	}
-
-	return c.Dark
-}
-
-// ForDark is the color for a dark color scheme: Dark, or else Light; none when transparent.
-func (c Color) ForDark() string {
-	if c.Dark != "" {
-		return c.Dark
-	}
-
-	return c.Light
-}
-
-// IsZero tells whether there is no logo.
-func (l Logo) IsZero() bool { return l == Logo{} }
-
-// ForLight is the logo for a light color scheme: Light, or else Dark.
-func (l Logo) ForLight() string {
-	if l.Light != "" {
-		return l.Light
-	}
-
-	return l.Dark
-}
-
-// ForDark is the logo for a dark color scheme: Dark, or else Light.
-func (l Logo) ForDark() string {
-	if l.Dark != "" {
-		return l.Dark
-	}
-
-	return l.Light
-}
-
-// Files are the logos named, each once.
-func (l Logo) Files() []string {
-	var out []string
-
-	for _, f := range []string{l.Light, l.Dark} {
-		if f != "" && !slices.Contains(out, f) {
-			out = append(out, f)
-		}
-	}
-
-	return out
-}
-
-// maxLogoURL bounds a logo's URL.
-const maxLogoURL = 2048
-
-// LogoURL tells whether logo is an https URL, which a listing fetches, rather than a file of the
-// plugin's directory.
-func LogoURL(logo string) bool {
-	u, err := url.Parse(logo)
-
-	return err == nil && len(logo) <= maxLogoURL && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Opaque == ""
 }
 
 func localPath(p string) bool {
@@ -790,42 +521,8 @@ func (m Manifest) AnyPlatform() bool {
 }
 
 // Extras are the files of the plugin's directory kept under their own paths beside the manifest:
-// the ones the extensions name, the logo, unless it is a URL, and a meta plugin's schemas.
-func (m Manifest) Extras() []string {
-	out := slices.Clone(m.ExtraFiles)
-
-	for _, l := range m.Logo.Files() {
-		if !LogoURL(l) {
-			out = append(out, l)
-		}
-	}
-
-	for _, name := range slices.Sorted(maps.Keys(m.Schemas)) {
-		out = append(out, m.Schemas[name].Message, m.Schemas[name].Answer)
-	}
-
-	slices.Sort(out)
-
-	return slices.Compact(out)
-}
-
-// CheckSchemas reads each of a meta plugin's schema files with read and says which isn't JSON.
-func CheckSchemas(m Manifest, read func(string) ([]byte, error)) error {
-	for _, name := range slices.Sorted(maps.Keys(m.Schemas)) {
-		for _, f := range []string{m.Schemas[name].Message, m.Schemas[name].Answer} {
-			data, err := read(f)
-			if err != nil {
-				return fmt.Errorf("%w: schemas.%s: %w", ErrManifest, name, err)
-			}
-
-			if !json.Valid(data) {
-				return fmt.Errorf("%w: schemas.%s: %s is no JSON", ErrManifest, name, f)
-			}
-		}
-	}
-
-	return nil
-}
+// the ones the extensions' keys name.
+func (m Manifest) Extras() []string { return m.ExtraFiles }
 
 // Supports tells whether the plugin is built for platform, given as os/arch.
 func (m Manifest) Supports(osArch string) bool {

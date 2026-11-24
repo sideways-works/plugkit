@@ -2,9 +2,7 @@ package repository
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +13,6 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
-
-	"github.com/sideways-works/plugkit/manifest"
 )
 
 // logoTimeout bounds a logo's fetch, from its dial to its last byte.
@@ -104,44 +100,6 @@ func logoClient(opt Options) *http.Client {
 		Timeout:       logoTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect },
 	}
-}
-
-// fetchLogo is the image at the https URL u and its media type, from opt.LogoCache when an earlier
-// fetch for the same version kept it there.
-func fetchLogo(ctx context.Context, u, version string, opt Options) ([]byte, string, error) {
-	if !manifest.LogoURL(u) {
-		return nil, "", fmt.Errorf("%w %s: an https URL with a host and no user or password", ErrLogo, u)
-	}
-
-	kept := ""
-
-	if opt.LogoCache != "" {
-		sum := sha256.Sum256([]byte(u + "\x00" + version))
-		kept = filepath.Join(opt.LogoCache, hex.EncodeToString(sum[:]))
-
-		if data, err := os.ReadFile(kept); err == nil && len(data) <= MaxLogo { //nolint:gosec // the cache's own file, by its hash
-			if typ := imageType(data); typ != "" {
-				return data, typ, nil
-			}
-		}
-	}
-
-	data, err := download(ctx, u, opt, MaxLogo)
-	if err != nil {
-		return nil, "", fmt.Errorf("%w %s: %w", ErrLogo, u, err)
-	}
-
-	typ := imageType(data)
-	if typ == "" {
-		return nil, "", fmt.Errorf("%w %s: neither SVG, PNG, JPEG nor WebP", ErrLogo, u)
-	}
-
-	if kept != "" {
-		// a logo not kept is fetched again, and nothing else changes
-		_ = keepFile(kept, data) //nolint:errcheck // as above
-	}
-
-	return data, typ, nil
 }
 
 func download(ctx context.Context, u string, opt Options, limit int64) ([]byte, error) {

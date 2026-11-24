@@ -106,6 +106,17 @@ func missingInclude(m manifest.Manifest, names []string) string {
 	return ""
 }
 
+// MissingExtra is the first file m's keys name that names lacks, empty when it lacks none.
+func MissingExtra(m manifest.Manifest, names []string) string {
+	for _, e := range m.Extras() {
+		if !slices.Contains(names, e) {
+			return e
+		}
+	}
+
+	return ""
+}
+
 // fixedTime is every entry's time, so the same build packs to the same bytes.
 var fixedTime = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -169,8 +180,8 @@ func PackWith(dir string, w io.Writer, ext manifest.Extensions) error {
 		return fmt.Errorf("%w: pack %s: no file of included path %s", ErrBundle, dir, inc)
 	}
 
-	if err := manifest.CheckSchemas(m, readIn(dir)); err != nil {
-		return fmt.Errorf("%w: pack %s: %w", ErrBundle, dir, err)
+	if e := MissingExtra(m, names); e != "" {
+		return fmt.Errorf("%w: pack %s: no file %s, which a key of the manifest names", ErrBundle, dir, e)
 	}
 
 	slices.Sort(names)
@@ -213,13 +224,6 @@ func write(dir string, m manifest.Manifest, names []string, w io.Writer) error {
 	}
 
 	return nil
-}
-
-// readIn reads a file of dir by its slash-separated path, which the manifest's checks keep in dir.
-func readIn(dir string) func(string) ([]byte, error) {
-	return func(name string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(dir, filepath.FromSlash(name))) //nolint:gosec // a file of the plugin's layout
-	}
 }
 
 func readManifest(dir string, ext manifest.Extensions) (manifest.Manifest, []byte, error) {
@@ -303,8 +307,8 @@ func UnpackWith(file, dest string, limits Limits, ext manifest.Extensions) (mani
 		return manifest.Manifest{}, fmt.Errorf("%w: the manifest includes %s, and the zip holds no file of it", ErrBundle, inc)
 	}
 
-	if err := manifest.CheckSchemas(m, readIn(dest)); err != nil {
-		return manifest.Manifest{}, fmt.Errorf("%w: %w", ErrBundle, err)
+	if e := MissingExtra(m, slices.Collect(maps.Keys(seen))); e != "" {
+		return manifest.Manifest{}, fmt.Errorf("%w: the zip holds no file %s, which a key of the manifest names", ErrBundle, e)
 	}
 
 	return m, nil

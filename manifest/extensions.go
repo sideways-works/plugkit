@@ -29,14 +29,10 @@ const anyKey = "*"
 // listings, not for packing, unpacking or building a plugin whose keys name files.
 var AnyExtension = Extensions{anyKey: {}} //nolint:gochecknoglobals // a value to pass, never changed
 
-// Moving are the keys plugkit still reads into Manifest's fields and gives in Extra as well, while
-// the products move to reading them from there; plugkit stops reading them in a later version.
-var Moving = []string{"logo", "color", "spec", "schemas", "ack_timeout", "permissions"} //nolint:gochecknoglobals // a list to read
-
 // check refuses each key of extra that e doesn't accept, each value its check refuses and each
 // file it names that is no path of the plugin's directory, in the order of the keys, and returns
-// the files; a moving key is plugkit's still, and checked by e only when e names it.
-func (e Extensions) check(extra map[string]yaml.Node, moving []string, lines map[string]int, add func(string, ...any)) []string {
+// the files.
+func (e Extensions) check(extra map[string]yaml.Node, lines map[string]int, add func(string, ...any)) []string {
 	var files []string
 
 	for _, k := range slices.Sorted(maps.Keys(extra)) {
@@ -44,10 +40,7 @@ func (e Extensions) check(extra map[string]yaml.Node, moving []string, lines map
 
 		f, ok := e[k]
 
-		switch {
-		case !ok && slices.Contains(moving, k):
-			continue
-		case !ok:
+		if !ok {
 			if f, ok = e[anyKey]; !ok {
 				add("line %d: field %s not found", lines[k], k)
 
@@ -94,11 +87,11 @@ func (e Extensions) CheckMapping(m *yaml.Node, extra map[string]yaml.Node, add f
 		}
 	}
 
-	e.check(extra, nil, lines, add)
+	e.check(extra, lines, add)
 }
 
-// extraOf is extra, the top-level keys of data plugkit doesn't read, with the moving keys added,
-// and the line of each top-level key.
+// extraOf is extra, the top-level keys of data plugkit doesn't read, and the line of each
+// top-level key.
 func extraOf(data []byte, extra map[string]yaml.Node) (map[string]yaml.Node, map[string]int, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -111,12 +104,7 @@ func extraOf(data []byte, extra map[string]yaml.Node) (map[string]yaml.Node, map
 	if len(doc.Content) == 1 && doc.Content[0].Kind == yaml.MappingNode {
 		m := doc.Content[0]
 		for i := 0; i+1 < len(m.Content); i += 2 {
-			k := m.Content[i].Value
-			lines[k] = m.Content[i].Line
-
-			if slices.Contains(Moving, k) {
-				out[k] = *m.Content[i+1]
-			}
+			lines[m.Content[i].Value] = m.Content[i].Line
 		}
 	}
 
