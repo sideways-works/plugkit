@@ -180,6 +180,9 @@ needs, `implements` and `requires`, each a list of `"<name> <semver range>"`.
 `logo` is one image for both color schemes, or one for each:
 `logo: {light: logo.svg, dark: logo-dark.svg}`, either alone standing in
 for both. A repository manifest's entry takes `logo` in the same two forms.
+`color` is the background a listing gives the logo: `transparent`, or
+`{light: "#rrggbb", dark: "#rrggbb"}` with either alone standing in for
+both; how it contrasts with what is drawn on it is the listing's to judge.
 A plugin of kind `meta` is schemas alone: no `build` and no `program`, and
 `schemas`, a JSON Schema file for each message and one for its answer, with
 an optional `ack_timeout`, the Go duration a receiver has to ack or nack a

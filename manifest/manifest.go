@@ -53,9 +53,10 @@ type Manifest struct {
 	// the same relative paths, after the build if there is one. A plugin with no program may have
 	// no build at all: then nothing runs.
 	Include []string `yaml:"include"`
-	// Description and Logo are for listings.
+	// Description, Logo and Color are for listings.
 	Description string `yaml:"description"`
 	Logo        Logo   `yaml:"logo"`
+	Color       Color  `yaml:"color"`
 	// Implements and Requires are "<name> <semver range>": the interfaces the plugin offers and those
 	// it needs another plugin to offer.
 	Implements []string `yaml:"implements"`
@@ -351,6 +352,12 @@ func (m Manifest) checkListing(add func(string, ...any)) {
 		}
 	}
 
+	for _, c := range []struct{ key, color string }{{"color.light", m.Color.Light}, {"color.dark", m.Color.Dark}} {
+		if c.color != "" && !hexColor.MatchString(c.color) {
+			add("%s %q: a color as #rrggbb, six hex digits", c.key, c.color)
+		}
+	}
+
 	for key, list := range map[string][]string{"implements": m.Implements, "requires": m.Requires} {
 		for _, e := range list {
 			n, r, ok := strings.Cut(strings.TrimSpace(e), " ")
@@ -548,6 +555,81 @@ func (l *Logo) UnmarshalYAML(n *yaml.Node) error {
 	*l = out
 
 	return nil
+}
+
+// Color is the background a listing gives a plugin's logo, for a light and for a dark color scheme,
+// each #rrggbb; or Transparent, the string transparent, for none. Either color alone stands in for
+// both. How it contrasts with what is drawn on it is the listing's to judge.
+type Color struct {
+	Light       string `yaml:"light"`
+	Dark        string `yaml:"dark"`
+	Transparent bool   `yaml:"-"`
+}
+
+// colorTransparent is the string form of a color that is none.
+const colorTransparent = "transparent"
+
+var (
+	errColor = errors.New("color")
+	hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+)
+
+// UnmarshalYAML reads the string transparent, and a mapping of light and dark.
+func (c *Color) UnmarshalYAML(n *yaml.Node) error {
+	switch {
+	case n.Kind == yaml.ScalarNode && n.Value == colorTransparent:
+		*c = Color{Transparent: true}
+
+		return nil
+	case n.Kind != yaml.MappingNode:
+		return fmt.Errorf("%w: line %d: the string %s, or a mapping of light and dark, each #rrggbb", errColor, n.Line, colorTransparent)
+	}
+
+	var out Color
+
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+
+		var err error
+
+		switch k.Value {
+		case "light":
+			err = v.Decode(&out.Light)
+		case "dark":
+			err = v.Decode(&out.Dark)
+		default:
+			return fmt.Errorf("%w: line %d: field %s not found: it takes light and dark", errColor, k.Line, k.Value)
+		}
+
+		if err != nil {
+			return err //nolint:wrapcheck // the decoder's own error, with its line
+		}
+	}
+
+	*c = out
+
+	return nil
+}
+
+// IsZero tells whether the manifest names no color.
+func (c Color) IsZero() bool { return c == Color{} }
+
+// ForLight is the color for a light color scheme: Light, or else Dark; none when transparent.
+func (c Color) ForLight() string {
+	if c.Light != "" {
+		return c.Light
+	}
+
+	return c.Dark
+}
+
+// ForDark is the color for a dark color scheme: Dark, or else Light; none when transparent.
+func (c Color) ForDark() string {
+	if c.Dark != "" {
+		return c.Dark
+	}
+
+	return c.Light
 }
 
 // IsZero tells whether there is no logo.

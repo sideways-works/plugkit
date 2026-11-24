@@ -564,3 +564,42 @@ func TestALogoTakesAStringOrAMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestAColorTakesTransparentOrAMappingOfHexColors(t *testing.T) {
+	for text, want := range map[string]Color{
+		"color: transparent\n":                             {Transparent: true},
+		"color: {light: \"#1a2b3c\", dark: \"#FFEEDD\"}\n": {Light: "#1a2b3c", Dark: "#FFEEDD"},
+		"color:\n  dark: \"#000000\"\n":                    {Dark: "#000000"},
+		"":                                                 {},
+	} {
+		m, err := Parse([]byte(good + text))
+		if err != nil {
+			t.Fatalf("%q: %v", text, err)
+		}
+
+		if m.Color != want {
+			t.Errorf("%q: %+v, want %+v", text, m.Color, want)
+		}
+	}
+
+	// either alone stands in for both
+	if c := (Color{Dark: "#000000"}); c.ForLight() != "#000000" || c.ForDark() != "#000000" {
+		t.Errorf("dark alone: %q %q", c.ForLight(), c.ForDark())
+	}
+
+	if c := (Color{Transparent: true}); c.ForLight() != "" || c.IsZero() {
+		t.Errorf("transparent: %+v", c)
+	}
+
+	for text, says := range map[string]string{
+		good + "color: red\n":                           "color: line 10: the string transparent, or a mapping",
+		good + "color: {light: \"#123\"}\n":             `color.light "#123": a color as #rrggbb`,
+		good + "color: {dark: \"#12345g\"}\n":           `color.dark "#12345g": a color as #rrggbb`,
+		good + "color: {light: \"#123456\", tint: x}\n": "color: line 10: field tint not found: it takes light and dark",
+		good + "color: [\"#123456\"]\n":                 "color: line 10: the string transparent",
+	} {
+		if _, err := Parse([]byte(text)); err == nil || !strings.Contains(err.Error(), says) {
+			t.Errorf("%q: %v, want %q", text, err, says)
+		}
+	}
+}
